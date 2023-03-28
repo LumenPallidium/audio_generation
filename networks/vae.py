@@ -1,0 +1,287 @@
+import torch
+import torchaudio
+import einops
+from quantizer import ResidualQuantizer, tuple_checker
+
+# these are modified from:
+# https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
+class CausalConv1d(torch.nn.Module):
+    """A 1D convolution which masks future inputs."""
+    def __init__(self, 
+                 in_channels, 
+                 out_channels, 
+                 kernel_size, 
+                 dilation=1, 
+                 stride = 1, 
+                 bias=True,
+                 groups = 1):
+        super().__init__()
+        self.conv = torch.nn.Conv1d(in_channels, out_channels, kernel_size, 
+                                    stride = stride, dilation=dilation, bias=bias,
+                                    groups = groups)
+        self.dilation = dilation
+
+        self.pad = (self.dilation * (self.conv.kernel_size[0] - 1), 0)
+
+    def forward(self, x):
+        x = torch.nn.functional.pad(x, self.pad)
+        return self.conv(x)
+    
+class CausalConvT1d(torch.nn.Module):
+    """A 1D transposed convolution which masks future inputs."""
+    def __init__(self, 
+                 in_channels, 
+                 out_channels, 
+                 kernel_size, 
+                 stride = 1, 
+                 bias=True,
+                 padding = 0,
+                 output_padding = 0):
+        super().__init__()
+        self.conv = torch.nn.ConvTranspose1d(in_channels, out_channels, kernel_size, 
+                                             stride = stride, bias=bias, padding = padding, 
+                                             output_padding = output_padding)
+        self.stride = stride
+
+
+    def forward(self, x):
+        length = x.shape[-1]
+        x = self.conv(x)
+        return x[..., :(length * self.stride)]
+    
+class CausalResidualBlock1d(torch.nn.Module):
+    """A residual block with causal convolutions. Standard convolution followed by kernel = 1 convolution."""
+    def __init__(self, 
+                 in_channels, 
+                 out_channels, 
+                 kernel_size = 7, 
+                 dilation=1, 
+                 bias=True, 
+                 activation=torch.nn.LeakyReLU(negative_slope=0.3),
+                 dropout = 0.0,
+                 depthwise = True):
+        super().__init__()
+        if depthwise:
+            self.conv1 = torch.nn.Sequential(CausalConv1d(in_channels, in_channels, 1, bias=bias, groups = in_channels),
+                                             CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=bias))
+        else:
+            self.conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=bias)
+
+        self.conv2 = CausalConv1d(out_channels, out_channels, 1, bias=bias)
+        self.activation = activation
+        self.dropout = torch.nn.Dropout(dropout)
+
+    
+    def forward(self, x):
+        x_p = self.activation(self.conv1(x))
+        x_p = self.conv2(x_p)
+        x_p = self.dropout(x_p)
+        return x + x_p
+    
+class CausalEncoderBlock(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 stride,
+                 n_layers = 4,
+                 activation = torch.nn.LeakyReLU(negative_slope=0.3)):
+        super().__init__()
+        dilations = [3**i for i in range(n_layers - 1)]
+
+        layers = [torch.nn.Sequential(CausalResidualBlock1d(in_channels, in_channels, dilation=dilation),
+                                      activation) for dilation in dilations]
+        layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
+                                          activation))
+
+        self.layers = torch.nn.ModuleList(layers)
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+    
+class CausalDecoderBlock(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 stride,
+                 padding = 0,
+                 output_padding = 0,
+                 n_layers = 4,
+                 activation = torch.nn.LeakyReLU(negative_slope=0.3)):
+        super().__init__()
+        dilations = [3**i for i in range(n_layers - 1)]
+        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride=stride, padding = padding, output_padding = output_padding),
+                                           activation)
+        layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, out_channels, dilation=dilation),
+                                      activation) for dilation in dilations]
+        
+        self.layers = torch.nn.ModuleList(layers)
+
+
+    def forward(self, x):
+        x = self.in_conv(x)
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
+    
+class CausalVQAE(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 n_blocks = 4,
+                 n_layers_per_block = 4,
+                 first_block_channels = 32,
+                 num_quantizers = 8,
+                 codebook_size = 1024,
+                 codebook_dim = 512,
+                 use_vq = True,
+                 vq_type = "base",
+                 strides = (2, 4, 5, 8),
+                 input_format = "b l c",
+                 paddings = (0, 2, 4, 5),
+                 output_paddings = (1, 1, 0, 1),
+                 channel_multiplier = 2,
+                 norm = torch.nn.Identity,
+                 zero_center = False):
+        
+        super().__init__()
+        self.in_channels = in_channels
+        self.n_blocks = n_blocks
+        self.n_layers_per_block = n_layers_per_block
+        self.num_quantizers = num_quantizers
+        self.zero_center = zero_center
+        self.use_vq = use_vq
+
+        self.codebook_dim = codebook_dim
+        self.codebook_size = tuple_checker(codebook_size, n_blocks)
+        self.strides = tuple_checker(strides, n_blocks)
+
+        self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
+                                           dim = codebook_dim, 
+                                           quantizer_class = vq_type, 
+                                           codebook_sizes = codebook_size)
+        
+        # so this can operate as VAE if desired
+        self.mu_logvar = torch.nn.Linear(codebook_dim, 2 * codebook_dim)
+
+        channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
+
+        # init encoders
+        encoders = [torch.nn.Sequential(norm(),
+                                        CausalConv1d(in_channels, first_block_channels, 7))]
+
+        for i in range(self.n_blocks):
+            encoders.append(CausalEncoderBlock(channel_sizes[i], 
+                                               channel_sizes[i + 1], 
+                                               self.strides[i], 
+                                               self.n_layers_per_block, ))
+            
+        encoders.append(CausalConv1d(channel_sizes[-1], codebook_dim, 3))
+
+        # init decoders
+        decoders = [CausalConvT1d(codebook_dim, channel_sizes[-1], 7)]
+
+        for i in range(self.n_blocks, 0 , -1):
+            decoders.append(CausalDecoderBlock(channel_sizes[i], 
+                                               channel_sizes[i - 1], 
+                                               self.strides[i - 1], 
+                                               n_layers = self.n_layers_per_block,
+                                               padding = paddings[i - 1],
+                                               output_padding = output_paddings[i - 1],))
+            
+        # last decoder layer
+        decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
+
+        if input_format == "b l c":
+            self.rearrange_in = einops.layers.torch.Rearrange("b l c -> b c l")
+            self.rearrange_in = einops.layers.torch.Rearrange("b c l -> b l c")
+        else:
+            self.rearrange_in = torch.nn.Identity()
+            self.rearrange_out = torch.nn.Identity()
+
+        self.encoders = torch.nn.ModuleList(encoders)
+        self.decoders = torch.nn.ModuleList(decoders)
+
+    def forward(self, x, update_codebook = False, codebook_n = None, multiscale = False, prioritize_early = False):
+        if self.zero_center:
+            mean = x.mean(dim = -1, keepdim = True).detach()
+            x = x - mean
+
+        x = self.rearrange_in(x)
+
+        for encoder in self.encoders:
+            x = encoder(x)
+
+        x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
+
+        if self.use_vq:
+
+            if codebook_n is None:
+                # sample n for bitrate dropout
+                codebook_n = torch.randint(1, self.quantizer.num_quantizers + 1, (1,)).item()
+            x_quantized, index, commit_loss = self.quantizer(x, 
+                                                            codebook_n, 
+                                                            update_codebook = update_codebook,
+                                                            prioritize_early = prioritize_early)
+
+            
+        else:
+            # TODO: make this an actual VAE (currently z is unused)
+            mu, logvar = torch.split(self.mu_logvar(x), self.codebook_dim, dim=-1)
+            # not actually quantized or commit loss ;)
+            x_quantized = x
+            index = torch.distributions.Normal(mu, logvar.exp()).rsample()
+            commit_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+        x_quantized = einops.rearrange(x_quantized,
+                                        "b l c -> b c l" )
+
+        multiscales = []
+        for decoder in self.decoders:
+            # each decoder takes the quantized from the previous encoder
+            x_quantized = decoder(x_quantized)
+            # multiscale forces the average (over channels) to be close to the original
+            if multiscale:
+                multiscales.append(x_quantized.mean(dim = 1, keepdim = True))
+
+        x_quantized = self.rearrange_out(x_quantized)
+
+        if self.zero_center:
+            x_quantized = x_quantized + mean
+ 
+        return x_quantized, commit_loss, index, multiscales
+
+
+#TODO : try varying codebooks sizes and dims
+#TODO : clean up below
+if __name__ == "__main__":
+    import os
+    from tqdm import tqdm
+    import matplotlib.pyplot as plt
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CausalVQAE(1, input_format = "n c l").to(device)
+
+
+    # from IPython.display import Audio
+    # train_loader = torch.utils.data.DataLoader(librispeech, 
+    #                                            batch_size = 8, 
+    #                                            shuffle = True,
+    #                                            collate_fn = lambda x : collator(x, resampler=resampler))
+    # train_loader_iter = iter(train_loader)
+    # x = next(train_loader_iter)
+    # x = torch.vstack(x).unsqueeze(1).to(device)
+    # model.eval()
+    # with torch.no_grad():
+    #   y, _, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
+    # model.train()
+    # Audio(x[0].cpu().numpy(), rate = 24000)
+    # Audio(y[0].detach().cpu().numpy(), rate = 24000)
+
+    #plt.plot(losses_to_running_loss(losses))
+        
+    # save torch tensor to wav
+    # import soundfile as sf
+    # sf.write("C:/Projects/test.wav", y[0].detach().cpu().numpy(), 16000)
+
