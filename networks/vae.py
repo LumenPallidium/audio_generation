@@ -1,10 +1,13 @@
 import torch
 import torchaudio
 import einops
+from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
 
-# these are modified from:
+# the causal convolution layers were initially modified from:
 # https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
+# and then updated based on:
+# https://github.com/facebookresearch/encodec/blob/main/encodec/modules/conv.py
 class CausalConv1d(torch.nn.Module):
     """A 1D convolution which masks future inputs."""
     def __init__(self, 
@@ -21,11 +24,18 @@ class CausalConv1d(torch.nn.Module):
                                     groups = groups)
         self.dilation = dilation
 
-        self.pad = (self.dilation * (self.conv.kernel_size[0] - 1), 0)
+        self.pad = self.dilation * (self.conv.kernel_size[0] - 1) - stride + 1
 
     def forward(self, x):
-        x = torch.nn.functional.pad(x, self.pad)
+        extra_pad = self._calc_extra_pad(x)
+        x = torch.nn.functional.pad(x, (self.pad, extra_pad))
         return self.conv(x)
+    
+    def _calc_extra_pad(self, x):
+        length = x.shape[-1]
+        next_length = (length - self.conv.kernel_size[0] + self.pad) / self.conv.stride[0] + 1
+        target_length = (ceil(next_length) - 1) * self.conv.stride[0] + self.conv.kernel_size[0] - self.pad
+        return target_length - length
     
 class CausalConvT1d(torch.nn.Module):
     """A 1D transposed convolution which masks future inputs."""
@@ -34,20 +44,17 @@ class CausalConvT1d(torch.nn.Module):
                  out_channels, 
                  kernel_size, 
                  stride = 1, 
-                 bias=True,
-                 padding = 0,
-                 output_padding = 0):
+                 bias=True):
         super().__init__()
         self.conv = torch.nn.ConvTranspose1d(in_channels, out_channels, kernel_size, 
-                                             stride = stride, bias=bias, padding = padding, 
-                                             output_padding = output_padding)
-        self.stride = stride
+                                             stride = stride, bias=bias)
+        self.right_pad = kernel_size - stride
 
 
     def forward(self, x):
-        length = x.shape[-1]
         x = self.conv(x)
-        return x[..., :(length * self.stride)]
+        pad = x.shape[-1] - self.right_pad
+        return x[..., :pad]
     
 class CausalResidualBlock1d(torch.nn.Module):
     """A residual block with causal convolutions. Standard convolution followed by kernel = 1 convolution."""
@@ -105,13 +112,11 @@ class CausalDecoderBlock(torch.nn.Module):
                  in_channels,
                  out_channels,
                  stride,
-                 padding = 0,
-                 output_padding = 0,
                  n_layers = 4,
                  activation = torch.nn.LeakyReLU(negative_slope=0.3)):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
-        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride=stride, padding = padding, output_padding = output_padding),
+        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride=stride),
                                            activation)
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, out_channels, dilation=dilation),
                                       activation) for dilation in dilations]
@@ -123,7 +128,6 @@ class CausalDecoderBlock(torch.nn.Module):
         x = self.in_conv(x)
         for layer in self.layers:
             x = layer(x)
-
         return x
     
 class CausalVQAE(torch.nn.Module):
@@ -139,8 +143,6 @@ class CausalVQAE(torch.nn.Module):
                  vq_type = "base",
                  strides = (2, 4, 5, 8),
                  input_format = "b l c",
-                 paddings = (0, 2, 4, 5),
-                 output_paddings = (1, 1, 0, 1),
                  channel_multiplier = 2,
                  norm = torch.nn.Identity,
                  zero_center = False):
@@ -186,9 +188,7 @@ class CausalVQAE(torch.nn.Module):
             decoders.append(CausalDecoderBlock(channel_sizes[i], 
                                                channel_sizes[i - 1], 
                                                self.strides[i - 1], 
-                                               n_layers = self.n_layers_per_block,
-                                               padding = paddings[i - 1],
-                                               output_padding = output_paddings[i - 1],))
+                                               n_layers = self.n_layers_per_block))
             
         # last decoder layer
         decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
@@ -262,6 +262,9 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CausalVQAE(1, input_format = "n c l").to(device)
+
+    x = torch.randn(8, 1, 72000).to(device)
+    y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
 
 
     # from IPython.display import Audio

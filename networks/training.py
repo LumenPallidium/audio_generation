@@ -48,7 +48,7 @@ def bitrate_calculator(stride_factor = 320, sample_rate = 24000, target_bitrate 
     for quantizer_number in example_quantizer_numbers:
         print(f"\tNum quantizers = {quantizer_number} -> {round(2 ** (bpf / quantizer_number))} num codebook entries")
 
-def collator(batch, size = 65536, resampler = None):
+def collator(batch, size = 72000, resampler = None):
     """A function for dealing with the irregular tensor/sequence
       sizes prevalent in audio datasets. Pads if they are too short,
       otherwise crops to the desired size"""
@@ -67,7 +67,7 @@ def collator(batch, size = 65536, resampler = None):
             suffix_zeros = torch.zeros((x.shape[0], diff - split))
 
             new_batch.append(torch.cat([prefix_zeros, x, suffix_zeros], dim = -1))
-        else:
+        elif x_len > size: # believe it or not i got an error here cause the sizes were identical
             # crop to a random part of the sample
             diff = x_len - size
             start = torch.randint(0, diff, (1,)).item()
@@ -512,7 +512,7 @@ if __name__ == "__main__":
     save_path = "C:/Projects/singing_models/"
     dataset_path = "C:/Projects/librispeech/"
     use_discriminator = True
-    scratch_train = False
+    scratch_train = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CausalVQAE(1, num_quantizers = 15, codebook_size = 256, input_format = "n c l", use_vq = False)
