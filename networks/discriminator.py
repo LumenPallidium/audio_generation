@@ -1,6 +1,6 @@
 import torch
 import einops
-from quantizer import tuple_checker
+from utils import tuple_checker
 
 
 class WaveformDiscriminatorBlock(torch.nn.Module):

@@ -4,108 +4,13 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
-from vae import CausalVQAE
 from IPython.display import Audio
 
-def plot_waveform(waveform, 
-                  sample_rate, 
-                  save_path = None, 
-                  ax = None, 
-                  return_ax = False, 
-                  alpha = 1,
-                  color = "blue"):
-    """Copied from torchaudio tutorial, extended somewhat."""
-    waveform = waveform.numpy()
+import utils
+from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
+from vae import CausalVQAE
 
-    num_channels, num_frames = waveform.shape
-    time_axis = torch.arange(0, num_frames) / sample_rate
-    if ax is None:
-        figure, ax = plt.subplots(1, 1)
-    else:
-        figure = ax.figure
 
-    ax.plot(time_axis, 
-            waveform[0], 
-            linewidth=1, 
-            alpha = alpha,
-            color = color)
-    ax.grid(True)
-    figure.suptitle("waveform")
-    if save_path is not None:
-        plt.savefig(save_path)
-        plt.close()
-    if return_ax:
-        return ax
-    
-def bitrate_calculator(stride_factor = 320, sample_rate = 24000, target_bitrate = 6000):
-    fps = sample_rate / stride_factor
-
-    bpf = target_bitrate / fps
-
-    example_quantizer_numbers = [i for i in range(4, 17)]
-    print(f"To have a bitrate of {target_bitrate} bps, with a stride factor of {stride_factor} and a sample rate of {sample_rate}, the codebook sizes should be as follows:")
-    for quantizer_number in example_quantizer_numbers:
-        print(f"\tNum quantizers = {quantizer_number} -> {round(2 ** (bpf / quantizer_number))} num codebook entries")
-
-def collator(batch, size = 72000, resampler = None):
-    """A function for dealing with the irregular tensor/sequence
-      sizes prevalent in audio datasets. Pads if they are too short,
-      otherwise crops to the desired size"""
-    new_batch = []
-    for x in batch:
-        # remove the label, may need to be changed for different datasets
-        x = x[0]
-        if resampler is not None:
-            x = resampler(x)
-        x_len = x.shape[-1]
-        if x_len < size:
-            # pad front and back with random length of zeros
-            diff = size - x_len
-            split = torch.randint(0, diff, (1,)).item()
-            prefix_zeros = torch.zeros((x.shape[0], split))
-            suffix_zeros = torch.zeros((x.shape[0], diff - split))
-
-            new_batch.append(torch.cat([prefix_zeros, x, suffix_zeros], dim = -1))
-        elif x_len > size: # believe it or not i got an error here cause the sizes were identical
-            # crop to a random part of the sample
-            diff = x_len - size
-            start = torch.randint(0, diff, (1,)).item()
-            end = start + size
-            new_batch.append(x[: , start:end])
-    return new_batch
-
-def print_stale_clusters(in_clusters, out_clusters):
-    for i, (in_cluster, out_cluster) in enumerate(zip(in_clusters, out_clusters)):
-        print(f"\tQuantizer {i} stale cluster change : {in_cluster} -> {out_cluster}")
-
-def dist_to_uniform(step, rate = 0.002, initial_dist = [1, 1, 1, 1]):
-    """Returns a distribution that is more uniform the more steps have passed."""
-    mean = sum(initial_dist) / len(initial_dist)
-    dist = [i - (i - mean) * step * rate for i in initial_dist]
-    return dist
-
-def interpolate_lists(list1, list2):
-    return lambda t : [t * i + (1 - t) * j for i, j in zip(list1, list2)]
-
-def losses_to_running_loss(losses, alpha = 0.95):
-    running_losses = []
-    running_loss = losses[0]
-    for loss in losses:
-        running_loss = (1 - alpha) * loss + alpha * running_loss
-        running_losses.append(running_loss)
-    return running_losses
-
-def get_latest_file(path, name):
-    """Util to get the most recent model checkpoints easily."""
-    files = [os.path.join(path, f) for f in os.listdir(path) if name in f]
-    try:
-        file = max(files, key = os.path.getmtime)
-        # replacing backslashes with forward slashes for windows
-        file = file.replace("\\","/")
-    except ValueError:
-        file = None
-    return file
 
 class WarmUpScheduler(object):
     """Copilot wrote this, made some small tweaks though."""
@@ -169,8 +74,8 @@ def save_samples(real, fake, epoch, i, path, sample_rate = 16000):
     real = real[0].detach().cpu()
     fake = fake[0].detach().cpu()
 
-    ax = plot_waveform(real, sample_rate, None, return_ax = True, alpha = 0.3)
-    plot_waveform(fake, sample_rate, name, ax = ax, color = "red", alpha = 0.3)
+    ax = utils.plot_waveform(real, sample_rate, None, return_ax = True, alpha = 0.3)
+    utils.plot_waveform(fake, sample_rate, name, ax = ax, color = "red", alpha = 0.3)
 
 class Trainer():
     def __init__(self,
@@ -416,7 +321,7 @@ class Trainer():
             train_loader = torch.utils.data.DataLoader(self.dataset,
                                                        batch_size=self.batch_size,
                                                        shuffle=True,
-                                                       collate_fn=lambda x : collator(x, resampler=self.resampler))
+                                                       collate_fn=lambda x : utils.collator(x, resampler=self.resampler))
             
             train_loader_iter = iter(train_loader)
 
@@ -435,7 +340,7 @@ class Trainer():
 
             print(f"Epoch {self.epoch} mean loss: ", np.mean(epoch_losses))
             self.print_loss_breakdown()
-            print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
+            utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
 
             if epoch % self.save_every == 0:
                 torch.save(self.model.state_dict(), self.save_path + f"model_epoch_{self.epoch}.pt")
@@ -449,7 +354,7 @@ class Trainer():
             self.epoch += 1
 
         if losses:
-            plt.plot(losses_to_running_loss(losses))
+            plt.plot(utils.losses_to_running_loss(losses))
             plt.show()
 
     def om_overtrain(self, batches = 16,  n_steps = 10000):
@@ -472,9 +377,9 @@ class Trainer():
             om_optimizer.step()
 
             if step % 100 == 0:
-                plot_waveform(y[0].detach().cpu(), 16000, save_path = "C:/Projects/test_om.png")
+                utils.plot_waveform(y[0].detach().cpu(), 16000, save_path = "C:/Projects/test_om.png")
 
-        plt.plot(losses_to_running_loss(losses_om))
+        plt.plot(utils.losses_to_running_loss(losses_om))
 
     def overtrain(self, batch_size = 16, n_steps = 5000):
         """Overtrains on a single sample from the data."""
@@ -485,7 +390,7 @@ class Trainer():
 
         train_loader = torch.utils.data.DataLoader(self.dataset,
                                                    batch_size=1,
-                                                   collate_fn=lambda x : collator(x, resampler=self.resampler))
+                                                   collate_fn=lambda x : utils.collator(x, resampler=self.resampler))
         optimizer = torch.optim.Adam(model.parameters(), lr = 5e-6)
         x = next(iter(train_loader))[0]
 
@@ -512,17 +417,18 @@ class Trainer():
 
         return y[0].detach().cpu()
 
-#TODO : maybe add seperate utils file
 #TODO : look into quantizer with extensible codebook
 #TODO : look into log-loss and fourier loss (L1 norm useful apparently)
 #TODO : test adding regressor variables (eg speaker gender)
-#TODO : maybe add better coding for experiments as folders
-#TODO : WAVELETS!!!!
+#TODO : try muliscale STFT discriminator like in encodec
 if __name__ == "__main__":
 
     # update these if running on your end
-    save_path = "C:/Projects/singing_models/"
+    experiment_name = input("Please enter an experiment name:")
+    experiment_name = "default_experiment" if experiment_name == "" else experiment_name
+    save_path = "C:/Projects/singing_models/" + experiment_name + "/"
     dataset_path = "C:/Projects/librispeech/"
+
     use_discriminator = True
     scratch_train = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -531,7 +437,7 @@ if __name__ == "__main__":
 
     #resampler = torchaudio.transforms.Resample(16000, 24000)
     if not scratch_train:
-        latest_model_path = get_latest_file(save_path, "model")
+        latest_model_path = utils.get_latest_file(save_path, "model")
     else:
         latest_model_path = None
 
@@ -540,8 +446,8 @@ if __name__ == "__main__":
                         STFTDiscriminator()]
 
         if not scratch_train:
-            latest_discriminator_path = get_latest_file(save_path, "wv_discriminator")
-            latest_stft_discriminator_path = get_latest_file(save_path, "stft_discriminator")
+            latest_discriminator_path = utils.get_latest_file(save_path, "wv_discriminator")
+            latest_stft_discriminator_path = utils.get_latest_file(save_path, "stft_discriminator")
         else:
             latest_discriminator_path = None
             latest_stft_discriminator_path = None
@@ -565,6 +471,7 @@ if __name__ == "__main__":
                       model_path = latest_model_path,
                       discriminators = discriminators,
                       discriminator_paths = [latest_discriminator_path, latest_stft_discriminator_path],
+                      sample_rate = 16000,
                       )
     
     #trainer.om_overtrain()

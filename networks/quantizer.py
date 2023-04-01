@@ -2,19 +2,14 @@ import torch
 from torch.nn import functional as F
 import einops
 
+from utils import tuple_checker
+
 # Module for quantizers. Lots of influence from OpenAI's Jukebox VQ-VAE, rosinality's VQ-VAE, and the OG paper:
 # https://arxiv.org/pdf/1711.00937.pdf
 
 # TODO : Add support for different types of quantizers, e.g. Gumbel-Softmax, etc.
 # TODO : maybe add a repulsion term to make the codebook vectors fill the data manifold better
 
-
-def tuple_checker(item, length):
-    if isinstance(item, (int, float, str)):
-        item = [item] * length
-    elif isinstance(item, (tuple, list)):
-        assert len(item) == length, f"Expected tuple of length {length}, got {len(item)}"
-    return item
 
 class BaseQuantizer(torch.nn.Module):
     """Base class for quantizers.
