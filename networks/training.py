@@ -187,6 +187,7 @@ class Trainer():
                  sample_rate = 24000,
                  discriminators = None,
                  discriminator_paths = None,
+                 use_one_discriminator = False,
                  codebook_update_step = 2,
                  mini_epoch_length = 100,
                  batch_size = 8,
@@ -219,6 +220,7 @@ class Trainer():
         self.batch_size = batch_size
         self.codebook_update_step = codebook_update_step
         self.sample_rate = sample_rate
+        self.use_one_discriminator = use_one_discriminator
 
         self.spec_windows = spec_windows
         self.spectrograms = [torchaudio.transforms.MelSpectrogram(sample_rate = self.sample_rate, 
@@ -298,15 +300,20 @@ class Trainer():
         """Executes a mini-epoch. Can be as part of a GAN etc."""
         optimizer = self.optimizers[0]
         if gan_loss:
-            # only one at a time
-            discriminator_number = np.random.randint(0, len(self.discriminators))
-            discriminator = self.discriminators[discriminator_number]
-            optimizer_d = self.optimizers[discriminator_number + 1]
+            if self.use_one_discriminator:
+                # only one at a time
+                discriminator_number = np.random.randint(0, len(self.discriminators))
+                discriminator = [self.discriminators[discriminator_number]]
+                optimizer_d = [self.optimizers[discriminator_number + 1]]
+            else:
+                discriminator = self.discriminators
+                optimizer_d = self.optimizers[1:]
         for i in range(self.mini_epoch_length // accumulation_steps):
             optimizer.zero_grad()
             
             if gan_loss:
-                optimizer_d.zero_grad()
+                for optimizer_d_i in optimizer_d:
+                    optimizer_d_i.zero_grad()
 
             for j in range(accumulation_steps):
 
@@ -353,9 +360,13 @@ class Trainer():
                     loss += multispectral_loss
 
                 if gan_loss:
-                    generator_loss, discriminator_loss = discriminator_generator_loss(x, y, discriminator)
-                    self.update_loss_breakdown(generator_loss, "generator_loss")
-                    loss += generator_loss * self.generator_loss_weight
+                    discriminator_loss = 0
+                    for discriminator_i in discriminator:
+                        generator_loss, discriminator_loss_i = discriminator_generator_loss(x, y, discriminator_i)
+                        self.update_loss_breakdown(generator_loss, "generator_loss")
+                        loss += generator_loss * self.generator_loss_weight
+
+                        discriminator_loss += discriminator_loss_i
 
                     discriminator_loss /= (accumulation_steps / self.generator_loss_weight)
                     discriminator_loss.backward(retain_graph = True)
@@ -369,7 +380,8 @@ class Trainer():
 
             optimizer.step()
             if gan_loss:
-                optimizer_d.step()
+                for optimizer_d_i in optimizer_d:
+                    optimizer_d_i.step()
             if scheduler is not None:
                 scheduler.step()
         
@@ -515,7 +527,7 @@ if __name__ == "__main__":
     scratch_train = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = CausalVQAE(1, num_quantizers = 15, codebook_size = 256, input_format = "n c l", use_vq = False)
+    model = CausalVQAE(1, num_quantizers = 15, codebook_size = 256, input_format = "n c l")
 
     #resampler = torchaudio.transforms.Resample(16000, 24000)
     if not scratch_train:
