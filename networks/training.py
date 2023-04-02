@@ -10,8 +10,6 @@ import utils
 from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
 from vae import CausalVQAE
 
-
-
 class WarmUpScheduler(object):
     """Copilot wrote this, made some small tweaks though."""
     def __init__(self, optimizer, scheduler, warmup_iter, total_iter = 300000):
@@ -100,7 +98,7 @@ class Trainer():
                  spec_bins = 64,
                  save_every = 1,
                  # these are based on experiments
-                 spec_loss_weight = 0.04,
+                 spec_loss_weight = 0.3,
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
@@ -345,9 +343,9 @@ class Trainer():
             if epoch % self.save_every == 0:
                 torch.save(self.model.state_dict(), self.save_path + f"model_epoch_{self.epoch}.pt")
                 if gan_loss:
-                    torch.save(self.discriminators[0].state_dict(), self.save_path + f"wv_discriminator_epoch_{self.epoch}.pt")
-                    torch.save(self.discriminators[1].state_dict(), self.save_path + f"stft_discriminator_epoch_{self.epoch}.pt")
-
+                    for discriminator_i in self.discriminators:
+                        torch.save(discriminator_i.state_dict(), self.save_path + f"{discriminator_i.name}_{self.epoch}.pt")
+                    
             if losses is not None:
                 losses = losses + epoch_losses
 
@@ -356,6 +354,8 @@ class Trainer():
         if losses:
             plt.plot(utils.losses_to_running_loss(losses))
             plt.show()
+
+        return losses
 
     def om_overtrain(self, batches = 16,  n_steps = 10000):
         """Overtrains on the OM sound for good luck."""
@@ -416,11 +416,27 @@ class Trainer():
         print("Param sum difference: ", end_param_sum - start_param_sum)
 
         return y[0].detach().cpu()
+    
+    def sample(self):
+        i = np.random.randint(0, len(self.dataset))
+        x = self.dataset[i].to(self.device)
+        x = utils.collator([x], resampler=self.resampler)[0]
+
+        model.eval()
+        with torch.no_grad():
+          y, _, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
+
+        # switch back to train mode
+        model.train()
+        Audio(y[0].detach().cpu().numpy(), rate = self.sample_rate)
+
+
 
 #TODO : look into quantizer with extensible codebook
 #TODO : look into log-loss and fourier loss (L1 norm useful apparently)
 #TODO : test adding regressor variables (eg speaker gender)
-#TODO : try muliscale STFT discriminator like in encodec
+#TODO : clean up discriminator set up - maybe make it default?
+#TODO : maybe look into loss balancer like encodec uses
 if __name__ == "__main__":
 
     # update these if running on your end
@@ -428,6 +444,7 @@ if __name__ == "__main__":
     experiment_name = "default_experiment" if experiment_name == "" else experiment_name
     save_path = "C:/Projects/singing_models/" + experiment_name + "/"
     dataset_path = "C:/Projects/librispeech/"
+    sample_rate = 16000
 
     use_discriminator = True
     scratch_train = True
@@ -442,19 +459,20 @@ if __name__ == "__main__":
         latest_model_path = None
 
     if use_discriminator:
-        discriminators = [WaveFormDiscriminator(1), 
-                        STFTDiscriminator()]
+        discriminators = [WaveFormDiscriminator(1)]
+        discriminators += [STFTDiscriminator(win_length = win) for win in [512, 
+                                                                           1024, 
+                                                                           2048
+                                                                           ]]
+        
+        latest_d_paths = []
 
-        if not scratch_train:
-            latest_discriminator_path = utils.get_latest_file(save_path, "wv_discriminator")
-            latest_stft_discriminator_path = utils.get_latest_file(save_path, "stft_discriminator")
+        if scratch_train:
+            latest_d_paths = [None] * len(discriminators)
         else:
-            latest_discriminator_path = None
-            latest_stft_discriminator_path = None
-    else:
-        discriminators = None
-        latest_discriminator_path = None
-        latest_stft_discriminator_path = None
+            for discriminator in discriminators:
+                latest_d_paths.append(utils.get_latest_file(save_path, discriminator.name))
+
 
     librispeech = torchaudio.datasets.LIBRISPEECH(dataset_path, url="train-clean-100", download=True)
     scheduler = WarmUpScheduler(torch.optim.Adam(model.parameters(), lr = 8e-5, amsgrad = True), 
@@ -470,12 +488,15 @@ if __name__ == "__main__":
                       scheduler = scheduler,
                       model_path = latest_model_path,
                       discriminators = discriminators,
-                      discriminator_paths = [latest_discriminator_path, latest_stft_discriminator_path],
-                      sample_rate = 16000,
+                      discriminator_paths = latest_d_paths,
+                      use_one_discriminator = True,
+                      sample_rate = sample_rate,
                       )
     
     #trainer.om_overtrain()
-    trainer.train(epochs = 15, losses = losses, gan_loss = use_discriminator, use_reconstruction_loss = False, sparsity_weight = 0)
+    losses = trainer.train(epochs = 15, losses = losses, 
+                           gan_loss = use_discriminator,
+                           use_reconstruction_loss = False, sparsity_weight = 0)
     #y = trainer.overtrain()
     #Audio(y.numpy(), rate = 16000)
 

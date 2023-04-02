@@ -2,6 +2,18 @@ import torch
 import matplotlib.pyplot as plt
 import os
 
+#TODO: add a function for weight and spectral normalization here
+
+def add_util_norm(module, norm = "weight", **norm_kwargs):
+    """Adds a norm from torch.nn.utils to a module"""
+    if norm == "weight":
+        norm_f = torch.nn.utils.weight_norm
+    elif norm == "spectral":
+        norm_f = torch.nn.utils.spectral_norm
+    else:
+        norm_f = lambda x: x
+    return norm_f(module, **norm_kwargs)
+
 def plot_waveform(waveform, 
                   sample_rate, 
                   save_path = None, 

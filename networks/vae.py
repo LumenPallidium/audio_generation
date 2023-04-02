@@ -3,6 +3,7 @@ import torchaudio
 import einops
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
+from utils import add_util_norm
 
 # the causal convolution layers were initially modified from:
 # https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
@@ -17,11 +18,13 @@ class CausalConv1d(torch.nn.Module):
                  dilation=1, 
                  stride = 1, 
                  bias=True,
-                 groups = 1):
+                 groups = 1,
+                 norm = "weight"):
         super().__init__()
-        self.conv = torch.nn.Conv1d(in_channels, out_channels, kernel_size, 
+        self.conv = add_util_norm(torch.nn.Conv1d(in_channels, out_channels, kernel_size, 
                                     stride = stride, dilation=dilation, bias=bias,
-                                    groups = groups)
+                                    groups = groups),
+                                  norm = norm)
         self.dilation = dilation
 
         self.pad = self.dilation * (self.conv.kernel_size[0] - 1) - stride + 1
@@ -44,10 +47,12 @@ class CausalConvT1d(torch.nn.Module):
                  out_channels, 
                  kernel_size, 
                  stride = 1, 
-                 bias=True):
+                 bias=True,
+                 norm = "weight"):
         super().__init__()
-        self.conv = torch.nn.ConvTranspose1d(in_channels, out_channels, kernel_size, 
-                                             stride = stride, bias=bias)
+        self.conv = add_util_norm(torch.nn.ConvTranspose1d(in_channels, out_channels, kernel_size, 
+                                             stride = stride, bias=bias),
+                                  norm = norm)
         self.right_pad = kernel_size - stride
 
 
@@ -66,7 +71,7 @@ class CausalResidualBlock1d(torch.nn.Module):
                  bias=True, 
                  activation=torch.nn.LeakyReLU(negative_slope=0.3),
                  dropout = 0.0,
-                 depthwise = True):
+                 depthwise = False):
         super().__init__()
         if depthwise:
             self.conv1 = torch.nn.Sequential(CausalConv1d(in_channels, in_channels, 1, bias=bias, groups = in_channels),
@@ -91,11 +96,15 @@ class CausalEncoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = torch.nn.LeakyReLU(negative_slope=0.3)):
+                 activation = torch.nn.LeakyReLU(negative_slope=0.3),
+                 depthwise = False):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
 
-        layers = [torch.nn.Sequential(CausalResidualBlock1d(in_channels, in_channels, dilation=dilation),
+        layers = [torch.nn.Sequential(CausalResidualBlock1d(in_channels, 
+                                                            in_channels, 
+                                                            dilation=dilation,
+                                                            depthwise = depthwise),
                                       activation) for dilation in dilations]
         layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
                                           activation))
@@ -113,12 +122,16 @@ class CausalDecoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = torch.nn.LeakyReLU(negative_slope=0.3)):
+                 activation = torch.nn.LeakyReLU(negative_slope=0.3),
+                 depthwise = False):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
         self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride=stride),
                                            activation)
-        layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, out_channels, dilation=dilation),
+        layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
+                                                            out_channels, 
+                                                            dilation=dilation,
+                                                            depthwise = depthwise),
                                       activation) for dilation in dilations]
         
         self.layers = torch.nn.ModuleList(layers)
@@ -145,7 +158,8 @@ class CausalVQAE(torch.nn.Module):
                  input_format = "b l c",
                  channel_multiplier = 2,
                  norm = torch.nn.Identity,
-                 zero_center = False):
+                 zero_center = False,
+                 depthwise = False):
         
         super().__init__()
         self.in_channels = in_channels
@@ -177,7 +191,8 @@ class CausalVQAE(torch.nn.Module):
             encoders.append(CausalEncoderBlock(channel_sizes[i], 
                                                channel_sizes[i + 1], 
                                                self.strides[i], 
-                                               self.n_layers_per_block, ))
+                                               self.n_layers_per_block, 
+                                               depthwise = depthwise))
             
         encoders.append(CausalConv1d(channel_sizes[-1], codebook_dim, 3))
 
@@ -188,7 +203,8 @@ class CausalVQAE(torch.nn.Module):
             decoders.append(CausalDecoderBlock(channel_sizes[i], 
                                                channel_sizes[i - 1], 
                                                self.strides[i - 1], 
-                                               n_layers = self.n_layers_per_block))
+                                               n_layers = self.n_layers_per_block,
+                                               depthwise = depthwise))
             
         # last decoder layer
         decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
@@ -254,7 +270,6 @@ class CausalVQAE(torch.nn.Module):
 
 
 #TODO : try varying codebooks sizes and dims
-#TODO : clean up below
 if __name__ == "__main__":
     import os
     from tqdm import tqdm
@@ -267,24 +282,4 @@ if __name__ == "__main__":
     y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
 
 
-    # from IPython.display import Audio
-    # train_loader = torch.utils.data.DataLoader(librispeech, 
-    #                                            batch_size = 8, 
-    #                                            shuffle = True,
-    #                                            collate_fn = lambda x : collator(x, resampler=resampler))
-    # train_loader_iter = iter(train_loader)
-    # x = next(train_loader_iter)
-    # x = torch.vstack(x).unsqueeze(1).to(device)
-    # model.eval()
-    # with torch.no_grad():
-    #   y, _, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
-    # model.train()
-    # Audio(x[0].cpu().numpy(), rate = 24000)
-    # Audio(y[0].detach().cpu().numpy(), rate = 24000)
-
-    #plt.plot(losses_to_running_loss(losses))
-        
-    # save torch tensor to wav
-    # import soundfile as sf
-    # sf.write("C:/Projects/test.wav", y[0].detach().cpu().numpy(), 16000)
 

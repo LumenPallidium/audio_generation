@@ -1,6 +1,6 @@
 import torch
 import einops
-from utils import tuple_checker
+from utils import tuple_checker, add_util_norm
 
 
 class WaveformDiscriminatorBlock(torch.nn.Module):
@@ -16,7 +16,8 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
                  strides = [1, 4, 4, 4, 4, 1, 1],
                  groups = [1, 4, 16, 64, 256, 1, 1],
                  activation = torch.nn.LeakyReLU(0.2),
-                 scale = 1):
+                 scale = 1,
+                 norm = "spectral"):
         super().__init__()
 
         n_steps = len(channel_sizes)
@@ -29,13 +30,15 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
         self.activation = activation
 
         layers = [torch.nn.AvgPool1d(2 * scale, stride = scale, padding = scale)]
-        layers += [torch.nn.Sequential(torch.nn.Conv1d(self.channel_sizes[i], self.channel_sizes[i + 1], 
+        layers += [torch.nn.Sequential(add_util_norm(torch.nn.Conv1d(self.channel_sizes[i], self.channel_sizes[i + 1], 
                                                       kernel_sizes[i], stride = strides[i], 
                                                       groups = groups[i]),
+                                                      norm = norm),
                                       activation) for i in range(n_steps - 1)]
         
         # last layer does not have activation
-        layers.append(torch.nn.Conv1d(channel_sizes[-1], 1, kernel_sizes[-1], stride = strides[-1], groups = groups[-1]))
+        layers.append(add_util_norm(torch.nn.Conv1d(channel_sizes[-1], 1, kernel_sizes[-1], stride = strides[-1], groups = groups[-1]),
+                                    norm = norm))
 
         self.layers = torch.nn.ModuleList(layers)
 
@@ -50,15 +53,18 @@ class WaveFormDiscriminator(torch.nn.Module):
     """As in the paper cited above, use three blocks, each acting on different scales"""
     def __init__(self,
                  in_channels,
+                 name = "waveform_discriminator",
                  n_blocks = 3,
                  scalefactor_per_block = 2,
-                 feature_multiplier = 100):
+                 feature_multiplier = 100,
+                 norm = "spectral"):
         
         super().__init__()
         self.feature_multiplier = feature_multiplier
+        self.name = name
         scales = [scalefactor_per_block**i for i in range(n_blocks)]
 
-        self.layers = torch.nn.ModuleList([WaveformDiscriminatorBlock(in_channels, scale = scale) for scale in scales])
+        self.layers = torch.nn.ModuleList([WaveformDiscriminatorBlock(in_channels, scale = scale, norm = norm) for scale in scales])
 
     def forward(self, x):
         features = []
@@ -78,21 +84,29 @@ class STFTDiscriminatorBlock(torch.nn.Module):
                  channel_multiplier,
                  stride,
                  kernel_size = None,
-                 activation = torch.nn.Identity()):
+                 padding = None,
+                 activation = torch.nn.Identity(),
+                 norm = "spectral"):
         
         super().__init__()
 
         if kernel_size is None:
             kernel_size = (stride[0] + 2, stride[1] + 2)
+        if padding is None:
+            padding = ((kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2)
 
-        self.layers = torch.nn.Sequential(torch.nn.Conv2d(in_channels, 
+        self.layers = torch.nn.Sequential(add_util_norm(torch.nn.Conv2d(in_channels, 
                                                           in_channels, 
-                                                          kernel_size = 3),
+                                                          kernel_size = 3,
+                                                          padding = 1),
+                                                         norm = norm),
                                            activation,
-                                           torch.nn.Conv2d(in_channels, 
+                                           add_util_norm(torch.nn.Conv2d(in_channels, 
                                                            in_channels * channel_multiplier, 
                                                            stride = stride, 
-                                                           kernel_size = kernel_size))
+                                                           kernel_size = kernel_size,
+                                                           padding = padding),
+                                                         norm = norm),)
         
 
     def forward(self, x):
@@ -107,33 +121,46 @@ class STFTDiscriminator(torch.nn.Module):
                  first_channel_size = 32,
                  channel_multipliers = [2, 2, 1, 2, 1, 2],
                  strides = [(1, 2), (2, 2)] * 3,
-                 n_fft = 1024,
-                 hop_length = 256,
                  win_length = 1024,
-                 feature_multiplier = 1):
+                 n_fft = None,
+                 hop_length = None,
+                 feature_multiplier = 1,
+                 norm = "spectral",
+                 base_name = "stft_discriminator"):
         super().__init__()
 
+        self.win_length = win_length
+        if n_fft is None:
+            n_fft = win_length
+        if hop_length is None:
+            hop_length = win_length // 4
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.win_length = win_length
+        
         self.feature_multiplier = feature_multiplier
+        self.name = f"{base_name}_{win_length}"
 
         self.num_blocks = len(channel_multipliers)
 
-        self.first_conv = torch.nn.Conv2d(in_channels, 
+        self.first_conv = add_util_norm(torch.nn.Conv2d(in_channels, 
                                           first_channel_size, 
-                                          kernel_size = 7)
+                                          kernel_size = 7,
+                                          padding = 3),
+                                        norm = norm)
 
         blocks = []
         new_channel = first_channel_size
         for i, (multiplier, stride) in enumerate(zip(channel_multipliers, strides)):
-            blocks.append(STFTDiscriminatorBlock(new_channel, multiplier, stride))
+            blocks.append(STFTDiscriminatorBlock(new_channel, multiplier, stride, norm = norm))
             new_channel = new_channel * multiplier
 
         self.blocks = torch.nn.ModuleList(blocks)
 
-        self.final_conv = torch.nn.Conv2d(new_channel, 1, 
-                                          kernel_size = (1, win_length // (2 ** (self.num_blocks + 1))))
+        final_kernel_size = win_length // (2 ** (self.num_blocks + 1))
+        self.final_conv = add_util_norm(torch.nn.Conv2d(new_channel, 1, 
+                                          kernel_size = (1, final_kernel_size),
+                                          padding = (0, (final_kernel_size - 1) // 2)),
+                                        norm = norm)
 
     def forward(self, x):
         # need to remove and re-add channel dimension
@@ -156,7 +183,7 @@ class STFTDiscriminator(torch.nn.Module):
         x = self.final_conv(x)
         return x, features
 
-def discriminator_generator_loss(original, reconstruction, discriminator, feature_multipier = 24):
+def discriminator_generator_loss(original, reconstruction, discriminator, feature_multipier = 100, scale_feature_loss = True):
     """A function that is mostly generic for types of dicriminators. Feature multiplier controls
     how much discrimination at different scales are weighted. For reference, the paper uses 
     100 for this multiplier. Another point of reference is that in general, the generation_loss
@@ -178,7 +205,11 @@ def discriminator_generator_loss(original, reconstruction, discriminator, featur
     # feature wise loss - generated samples should "look-like" original at all scales
     feature_loss = 0
     for x, y in zip(original_features, reconstruction_features):
-        feature_loss += l1_f(x, y)
+        feature_loss_i = l1_f(x, y)
+        if scale_feature_loss:
+            feature_loss_i /= torch.abs(x).mean()
+
+        feature_loss += feature_loss_i
 
     generator_loss = generation_loss + feature_multipier * feature_loss
 
