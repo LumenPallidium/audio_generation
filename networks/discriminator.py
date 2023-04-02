@@ -183,7 +183,7 @@ class STFTDiscriminator(torch.nn.Module):
         x = self.final_conv(x)
         return x, features
 
-def discriminator_generator_loss(original, reconstruction, discriminator, feature_multipier = 100, scale_feature_loss = True):
+def discriminator_generator_loss(original, reconstruction, discriminator, feature_multipier = 3, scale_feature_loss = True):
     """A function that is mostly generic for types of dicriminators. Feature multiplier controls
     how much discrimination at different scales are weighted. For reference, the paper uses 
     100 for this multiplier. Another point of reference is that in general, the generation_loss

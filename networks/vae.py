@@ -226,10 +226,6 @@ class CausalVQAE(torch.nn.Module):
 
         x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
 
-
-        if codebook_n is None:
-            # sample n for bitrate dropout
-            codebook_n = torch.randint(1, self.quantizer.num_quantizers + 1, (1,)).item()
         x_quantized, index, commit_loss = self.quantizer(x, 
                                                         codebook_n, 
                                                         update_codebook = update_codebook,

@@ -251,6 +251,7 @@ class ResidualQuantizer(torch.nn.Module):
         # if n is None, use all quantizers, for training n will typically be sampled uniformly from [1, num_quantizers]
         if n is None:
             n = self.num_quantizers + 1
+
         x_hat = 0
         residual = x
         inner_loss = 0

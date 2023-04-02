@@ -30,7 +30,7 @@ class WarmUpScheduler(object):
 def multispectral_reconstruction_loss(original, 
                                    reconstruction,
                                    spectrograms,
-                                   windows = [2 ** i for i in range(6, 12)],
+                                   windows = [2 ** i for i in range(5, 12)],
                                    eps = 1e-8,
                                    spec_loss_weight = 1,
                                    use_log_l2 = False,
@@ -39,9 +39,9 @@ def multispectral_reconstruction_loss(original,
     https://arxiv.org/pdf/2008.01160.pdf"""
     l1_f = torch.nn.functional.l1_loss
     l2_f = torch.nn.functional.mse_loss
-
     if use_log_l2:
         l2_f = lambda x, y: l2_f((x + eps).log(), (y + eps).log())
+
     if scale_alpha:
         alphas = [np.sqrt(window / 2) for window in windows]
     else:
@@ -102,7 +102,7 @@ class Trainer():
                  spec_bins = 64,
                  save_every = 1,
                  # these are based on experiments
-                 spec_loss_weight = 0.3,
+                 spec_loss_weight = 1,
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
@@ -144,7 +144,7 @@ class Trainer():
         self.loss_breakdown = {}
         
         # load discriminators
-        self.discriminators = self._init_discriminators(discriminators, discriminator_paths, discriminator_lr)
+        self.discriminators, self.codebook_options = self._init_discriminators(discriminators, discriminator_paths, discriminator_lr)
 
         self.epoch = 0
         self.mini_epoch_i = 0
@@ -161,7 +161,13 @@ class Trainer():
                         discriminator.load_state_dict(torch.load(path))
                         print(f"\tLoaded discriminator from {path}")
 
-        return discriminators
+        # these help tie codebook dropout/bitrate to the discriminators
+        nq = self.model.quantizer.num_quantizers
+        nq_per_d = nq // (len(discriminators) - 1)
+        # use all for waveform d, then a fraction for each spec d, all for the final spec d
+        codebook_options = [nq] + [nq_per_d * (i + 1) for i in range(len(discriminators) - 2)] + [nq]
+
+        return discriminators, codebook_options
     
 
     def _init_optimizers(self, model_lr):
@@ -212,9 +218,16 @@ class Trainer():
                 discriminator_number = np.random.randint(0, len(self.discriminators))
                 discriminator = [self.discriminators[discriminator_number]]
                 optimizer_d = [self.optimizers[discriminator_number + 1]]
+
+                # chosen discriminator determines bitrate
+                codebook_n = self.codebook_options[discriminator_number]
             else:
+                codebook_n = np.random.randint(1, len(self.model.num_quantizers))
                 discriminator = self.discriminators
                 optimizer_d = self.optimizers[1:]
+        else:
+            codebook_n = np.random.randint(1, len(self.model.num_quantizers))
+        
         for i in range(self.mini_epoch_length // accumulation_steps):
             optimizer.zero_grad()
             
@@ -232,7 +245,11 @@ class Trainer():
                 x = next(data_loader_iter)
                 x = torch.vstack(x).unsqueeze(1).to(self.device)
 
-                y, commit_loss, _, multiscales = self.model(x, multiscale = multiscale, update_codebook = update_codebook, prioritize_early = prioritize_early)
+                y, commit_loss, _, multiscales = self.model(x, 
+                                                            multiscale = multiscale, 
+                                                            update_codebook = update_codebook, 
+                                                            prioritize_early = prioritize_early,
+                                                            codebook_n = codebook_n)
 
                 self.update_loss_breakdown(commit_loss, "commit_loss")
 
@@ -436,7 +453,6 @@ class Trainer():
 
 
 #TODO : look into quantizer with extensible codebook
-#TODO : look into log-loss and fourier loss (L1 norm useful apparently)
 #TODO : test adding regressor variables (eg speaker gender)
 #TODO : clean up discriminator set up - maybe make it default?
 #TODO : maybe look into loss balancer like encodec uses
@@ -463,9 +479,11 @@ if __name__ == "__main__":
 
     if use_discriminator:
         discriminators = [WaveFormDiscriminator(1)]
-        discriminators += [STFTDiscriminator(win_length = win) for win in [512, 
-                                                                           1024, 
-                                                                           2048
+        discriminators += [STFTDiscriminator(win_length = win) for win in [#2048, 
+                                                                           #1024, 
+                                                                           #512,
+                                                                           256,
+                                                                           128
                                                                            ]]
         
         latest_d_paths = []
@@ -497,7 +515,7 @@ if __name__ == "__main__":
                       )
     
     #trainer.om_overtrain()
-    losses = trainer.train(epochs = 15, losses = losses, 
+    losses = trainer.train(epochs = 3, losses = losses, 
                            gan_loss = use_discriminator,
                            use_reconstruction_loss = True,
                            multiscale = False, 
