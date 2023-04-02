@@ -29,31 +29,35 @@ class WarmUpScheduler(object):
 
 def multispectral_reconstruction_loss(original, 
                                    reconstruction,
-                                   device,
                                    spectrograms,
                                    windows = [2 ** i for i in range(6, 12)],
                                    eps = 1e-8,
-                                   spec_loss_weight = 1):
+                                   spec_loss_weight = 1,
+                                   use_log_l2 = False,
+                                   scale_alpha = False):
     """Energy based spectral loss from here:
     https://arxiv.org/pdf/2008.01160.pdf"""
     l1_f = torch.nn.functional.l1_loss
     l2_f = torch.nn.functional.mse_loss
 
-    alphas = [np.sqrt(window / 2) for window in windows]
+    if use_log_l2:
+        l2_f = lambda x, y: l2_f((x + eps).log(), (y + eps).log())
+    if scale_alpha:
+        alphas = [np.sqrt(window / 2) for window in windows]
+    else:
+        alphas = [1 for window in windows]
+
     spec_loss = 0
     for i, spectrogram in enumerate(spectrograms):
         original_spec = torch.nan_to_num(spectrogram(original))
         reconstruction_spec = torch.nan_to_num(spectrogram(reconstruction))
         spec_loss +=  l1_f(original_spec, reconstruction_spec)
-        spec_loss += alphas[i] * l2_f((original_spec + eps).log(),
-                                      (reconstruction_spec + eps).log())
+        spec_loss += alphas[i] * l2_f(original_spec, reconstruction_spec)
     return spec_loss_weight * spec_loss
 
 def multiscale_reconstruction_loss(original,
                                    reconstructions,
-                                   device,
-                                   scale_weights = [0.25, 0.5, 1, 1.25, 0.01, 2.99],
-                                   sparsity_weight = 0.01):
+                                   scale_weights = [0.25, 0.5, 1, 1.25, 0.01, 2.99]):
     l2_f = torch.nn.functional.mse_loss
     downsample = torch.nn.functional.interpolate
 
@@ -234,7 +238,7 @@ class Trainer():
 
                 if use_reconstruction_loss:
                     if multiscale:
-                        loss = multiscale_reconstruction_loss(x, multiscales, self.device)
+                        loss = multiscale_reconstruction_loss(x, multiscales)
                     else:
                         loss = torch.nn.functional.l1_loss(x, y)
                         
@@ -253,8 +257,7 @@ class Trainer():
 
                 loss += commit_loss
                 if multispectral:
-                    multispectral_loss = multispectral_reconstruction_loss(x, y, 
-                                                              self.device, 
+                    multispectral_loss = multispectral_reconstruction_loss(x, y,
                                                               self.spectrograms, 
                                                               spec_loss_weight = self.spec_loss_weight, 
                                                               windows = self.spec_windows)
