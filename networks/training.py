@@ -499,7 +499,9 @@ if __name__ == "__main__":
     #trainer.om_overtrain()
     losses = trainer.train(epochs = 15, losses = losses, 
                            gan_loss = use_discriminator,
-                           use_reconstruction_loss = False, sparsity_weight = 0)
+                           use_reconstruction_loss = True,
+                           multiscale = False, 
+                           sparsity_weight = 0)
     #y = trainer.overtrain()
     #Audio(y.numpy(), rate = 16000)
 

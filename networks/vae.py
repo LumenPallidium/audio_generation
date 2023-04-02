@@ -152,7 +152,6 @@ class CausalVQAE(torch.nn.Module):
                  num_quantizers = 8,
                  codebook_size = 1024,
                  codebook_dim = 512,
-                 use_vq = True,
                  vq_type = "base",
                  strides = (2, 4, 5, 8),
                  input_format = "b l c",
@@ -167,7 +166,6 @@ class CausalVQAE(torch.nn.Module):
         self.n_layers_per_block = n_layers_per_block
         self.num_quantizers = num_quantizers
         self.zero_center = zero_center
-        self.use_vq = use_vq
 
         self.codebook_dim = codebook_dim
         self.codebook_size = tuple_checker(codebook_size, n_blocks)
@@ -177,9 +175,6 @@ class CausalVQAE(torch.nn.Module):
                                            dim = codebook_dim, 
                                            quantizer_class = vq_type, 
                                            codebook_sizes = codebook_size)
-        
-        # so this can operate as VAE if desired
-        self.mu_logvar = torch.nn.Linear(codebook_dim, 2 * codebook_dim)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 
@@ -231,24 +226,14 @@ class CausalVQAE(torch.nn.Module):
 
         x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
 
-        if self.use_vq:
 
-            if codebook_n is None:
-                # sample n for bitrate dropout
-                codebook_n = torch.randint(1, self.quantizer.num_quantizers + 1, (1,)).item()
-            x_quantized, index, commit_loss = self.quantizer(x, 
-                                                            codebook_n, 
-                                                            update_codebook = update_codebook,
-                                                            prioritize_early = prioritize_early)
-
-            
-        else:
-            # TODO: make this an actual VAE (currently z is unused)
-            mu, logvar = torch.split(self.mu_logvar(x), self.codebook_dim, dim=-1)
-            # not actually quantized or commit loss ;)
-            x_quantized = x
-            index = torch.distributions.Normal(mu, logvar.exp()).rsample()
-            commit_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        if codebook_n is None:
+            # sample n for bitrate dropout
+            codebook_n = torch.randint(1, self.quantizer.num_quantizers + 1, (1,)).item()
+        x_quantized, index, commit_loss = self.quantizer(x, 
+                                                        codebook_n, 
+                                                        update_codebook = update_codebook,
+                                                        prioritize_early = prioritize_early)
 
         x_quantized = einops.rearrange(x_quantized,
                                         "b l c -> b c l" )
