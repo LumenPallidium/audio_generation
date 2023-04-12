@@ -236,7 +236,7 @@ class CausalVQAE(torch.nn.Module):
 
         multiscales = []
         for decoder in self.decoders:
-            # each decoder takes the quantized from the previous encoder
+            # each decoder takes the quantized from the previous decoder
             x_quantized = decoder(x_quantized)
             # multiscale forces the average (over channels) to be close to the original
             if multiscale:

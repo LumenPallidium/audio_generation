@@ -125,6 +125,7 @@ class STFTDiscriminator(torch.nn.Module):
                  n_fft = None,
                  hop_length = None,
                  feature_multiplier = 1,
+                 normalize_stft = True,
                  norm = "spectral",
                  base_name = "stft_discriminator"):
         super().__init__()
@@ -136,6 +137,7 @@ class STFTDiscriminator(torch.nn.Module):
             hop_length = win_length // 4
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self.normalize_stft = normalize_stft
         
         self.feature_multiplier = feature_multiplier
         self.name = f"{base_name}_{win_length}"
@@ -167,7 +169,8 @@ class STFTDiscriminator(torch.nn.Module):
         x = x.squeeze(1)
         x = torch.stft(x, n_fft = self.n_fft, 
                        hop_length = self.hop_length, 
-                       win_length = self.win_length, 
+                       win_length = self.win_length,
+                       normalized = self.normalize_stft,
                        return_complex = False,
                        onesided = False)
         # flip time and frequency, convert real/imaginary part to channels

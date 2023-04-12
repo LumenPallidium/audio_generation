@@ -30,17 +30,15 @@ class WarmUpScheduler(object):
 def multispectral_reconstruction_loss(original, 
                                    reconstruction,
                                    spectrograms,
-                                   windows = [2 ** i for i in range(5, 12)],
+                                   windows = [2 ** i for i in range(6, 12)],
                                    eps = 1e-8,
                                    spec_loss_weight = 1,
-                                   use_log_l2 = False,
-                                   scale_alpha = False):
+                                   use_log_l2 = True,
+                                   scale_alpha = True):
     """Energy based spectral loss from here:
     https://arxiv.org/pdf/2008.01160.pdf"""
     l1_f = torch.nn.functional.l1_loss
     l2_f = torch.nn.functional.mse_loss
-    if use_log_l2:
-        l2_f = lambda x, y: l2_f((x + eps).log(), (y + eps).log())
 
     if scale_alpha:
         alphas = [np.sqrt(window / 2) for window in windows]
@@ -52,7 +50,10 @@ def multispectral_reconstruction_loss(original,
         original_spec = torch.nan_to_num(spectrogram(original))
         reconstruction_spec = torch.nan_to_num(spectrogram(reconstruction))
         spec_loss +=  l1_f(original_spec, reconstruction_spec)
-        spec_loss += alphas[i] * l2_f(original_spec, reconstruction_spec)
+        if use_log_l2:
+            spec_loss += alphas[i] * l2_f((original_spec + eps).log(), (reconstruction_spec + eps).log())
+        else:
+            spec_loss += alphas[i] * l2_f(original_spec, reconstruction_spec)
     return spec_loss_weight * spec_loss
 
 def multiscale_reconstruction_loss(original,
@@ -98,11 +99,11 @@ class Trainer():
                  codebook_update_step = 2,
                  mini_epoch_length = 100,
                  batch_size = 8,
-                 spec_windows = [2 **i for i in range(6, 12)],
+                 spec_windows = [2 **i for i in range(5, 12)],
                  spec_bins = 64,
                  save_every = 1,
                  # these are based on experiments
-                 spec_loss_weight = 1,
+                 spec_loss_weight = 0.01,
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
@@ -456,6 +457,8 @@ class Trainer():
 #TODO : test adding regressor variables (eg speaker gender)
 #TODO : clean up discriminator set up - maybe make it default?
 #TODO : maybe look into loss balancer like encodec uses
+#TODO : maybe add funtionality for selecting existing experiment
+#TODO : maybe add function to continue epochs from existing experiment
 if __name__ == "__main__":
 
     # update these if running on your end
@@ -466,10 +469,10 @@ if __name__ == "__main__":
     sample_rate = 16000
 
     use_discriminator = True
-    scratch_train = True
+    scratch_train = False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = CausalVQAE(1, num_quantizers = 15, codebook_size = 256, input_format = "n c l")
+    model = CausalVQAE(1, num_quantizers = 8, codebook_size = 1024, input_format = "n c l")
 
     #resampler = torchaudio.transforms.Resample(16000, 24000)
     if not scratch_train:
@@ -479,9 +482,9 @@ if __name__ == "__main__":
 
     if use_discriminator:
         discriminators = [WaveFormDiscriminator(1)]
-        discriminators += [STFTDiscriminator(win_length = win) for win in [#2048, 
-                                                                           #1024, 
-                                                                           #512,
+        discriminators += [STFTDiscriminator(win_length = win) for win in [2048, 
+                                                                           1024, 
+                                                                           512,
                                                                            256,
                                                                            128
                                                                            ]]
@@ -515,7 +518,7 @@ if __name__ == "__main__":
                       )
     
     #trainer.om_overtrain()
-    losses = trainer.train(epochs = 3, losses = losses, 
+    losses = trainer.train(epochs = 5, losses = losses, 
                            gan_loss = use_discriminator,
                            use_reconstruction_loss = True,
                            multiscale = False, 
