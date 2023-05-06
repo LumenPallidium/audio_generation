@@ -22,16 +22,18 @@ class BaseQuantizer(torch.nn.Module):
     """
     def __init__(self, dim : int, 
                  codebook_size : int,
-                 cut_freq : int = 2,
+                 cut_freq : int = 1,
                  alpha : float = 0.95,
                  replace_with_obs : bool = True,
-                 init_scale = 1.0):
+                 init_scale = 1.0,
+                 new_code_noise : float = 1e-5):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
         self.alpha = alpha
         self.cut_freq = cut_freq
         self.replace_with_obs = replace_with_obs
+        self.new_code_noise : float = new_code_noise
 
         self.stale_clusters = None
 
@@ -106,7 +108,6 @@ class BaseQuantizer(torch.nn.Module):
                 low_clusters = low_clusters.nonzero().squeeze(1)
                     
                 # replace the low clusters with the new clusters
-                
                 self.codebook[:, low_clusters] = high_vectors
 
         return codebook_onehot
@@ -174,7 +175,6 @@ class EMAQuantizer(BaseQuantizer):
                  alpha : float = 0.99, 
                  eps : float = 1e-5,
                  cut_freq : int = 2,
-                 new_code_noise : float = 1e-4,
                  replace_with_obs = True,
                  init_scale = 1.0):
         super().__init__(dim, 
@@ -185,7 +185,6 @@ class EMAQuantizer(BaseQuantizer):
                          init_scale = init_scale)
         
         self.eps = eps
-        self.new_code_noise = new_code_noise
 
         # disable grad for the codebook
         self.codebook.requires_grad = False
@@ -227,7 +226,8 @@ class ResidualQuantizer(torch.nn.Module):
                  codebook_sizes,
                  quantizer_class = "ema",
                  scale_factor = 4.0,
-                 priority_n = 24):
+                 priority_n = 24,
+                 vq_cutoff_freq = 1):
         
         super().__init__()
 
@@ -242,7 +242,10 @@ class ResidualQuantizer(torch.nn.Module):
         quantizer_type = EMAQuantizer if quantizer_class == "ema" else BaseQuantizer
         print(f"Initializing residual quantizer with class {quantizer_class}")
 
-        quantizers = [quantizer_type(self.dim, codebook_size, init_scale = scale) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
+        quantizers = [quantizer_type(self.dim, 
+                                     codebook_size, 
+                                     init_scale = scale,
+                                     cut_freq = vq_cutoff_freq) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
 
         self.quantizers = torch.nn.ModuleList(quantizers)
 
@@ -278,6 +281,17 @@ class ResidualQuantizer(torch.nn.Module):
         for quantizer in self.quantizers:
             stale_clusters.append(quantizer.stale_clusters)
         return stale_clusters
+    
+    def update_cutoff(self, new_cutoff = None, ratio = None):
+        """Update the cutoff frequency for all quantizers"""
+        if new_cutoff is not None:
+            for quantizer in self.quantizers:
+                quantizer.cut_freq = new_cutoff
+        elif ratio is not None:
+            for quantizer in self.quantizers:
+                quantizer.cut_freq = quantizer.cut_freq * ratio
+        else:
+            raise ValueError("Must specify either new cutoff or ratio")
 
 
 if __name__ == "__main__":

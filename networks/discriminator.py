@@ -2,6 +2,7 @@ import torch
 import einops
 from utils import tuple_checker, add_util_norm
 
+#TODO : look into nearly constant discriminator losses
 
 class WaveformDiscriminatorBlock(torch.nn.Module):
     """Waveform discriminator block as described here:
@@ -184,16 +185,25 @@ class STFTDiscriminator(torch.nn.Module):
             x = block(x)
             features.append(x)
         x = self.final_conv(x)
-        return x, features
+        return [x], features
 
-def discriminator_generator_loss(original, reconstruction, discriminator, feature_multipier = 3, scale_feature_loss = True):
+def discriminator_generator_loss(original, 
+                                 reconstruction, 
+                                 discriminator, 
+                                 feature_multipier = 100, 
+                                 scale_feature_loss = True,
+                                 seperation_loss = 1e-3):
     """A function that is mostly generic for types of dicriminators. Feature multiplier controls
     how much discrimination at different scales are weighted. For reference, the paper uses 
-    100 for this multiplier. Another point of reference is that in general, the generation_loss
-    value tends to be about 12x larger than feature loss."""
+    100 for this multiplier."""
     # get discrimination on the real and fake waveform
     original_d, original_features = discriminator(original.clone().requires_grad_())
     reconstruction_d, reconstruction_features = discriminator(reconstruction)
+    # why a second time? we need one copy for the generator loss throught the full disc + generator graph, and one for the discriminator loss
+    reconstruction_d2, _ = discriminator(reconstruction.detach().clone().requires_grad_())
+
+    # k = number of levels in the discriminator
+    k = len(original_d)
 
     relu_f = torch.nn.functional.relu
     l1_f = torch.nn.functional.l1_loss
@@ -201,14 +211,18 @@ def discriminator_generator_loss(original, reconstruction, discriminator, featur
     # general hinge loss for GAN
     discriminator_loss = 0
     generation_loss = 0
-    for x, y in zip(original_d, reconstruction_d):
-        discriminator_loss += (relu_f(1 - x) + relu_f(1 + y.detach())).mean()
-        generation_loss += relu_f(1 - y).mean()
+    for x, y, y_disc in zip(original_d, reconstruction_d, reconstruction_d2):
+        discriminator_loss += (relu_f(1 - x) + relu_f(1 + y_disc)).mean() / k
+        # extra loss term to ensure real and fake are seperated
+        discriminator_loss += seperation_loss / torch.abs(x - y_disc).mean()
+
+        generation_loss += relu_f(1 - y).mean() / k
 
     # feature wise loss - generated samples should "look-like" original at all scales
     feature_loss = 0
+    n_features = len(original_features)
     for x, y in zip(original_features, reconstruction_features):
-        feature_loss_i = l1_f(x, y)
+        feature_loss_i = l1_f(x, y) / n_features
         if scale_feature_loss:
             feature_loss_i /= torch.abs(x).mean()
 
@@ -216,7 +230,4 @@ def discriminator_generator_loss(original, reconstruction, discriminator, featur
 
     generator_loss = generation_loss + feature_multipier * feature_loss
 
-    # k = number of levels in the discriminator
-    k = len(original_d)
-
-    return generator_loss / k, discriminator_loss / k
+    return generator_loss, discriminator_loss

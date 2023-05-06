@@ -4,6 +4,7 @@ import einops
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
 from utils import add_util_norm
+from energy_transformers import EnergyTransformer
 
 # the causal convolution layers were initially modified from:
 # https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
@@ -152,29 +153,44 @@ class CausalVQAE(torch.nn.Module):
                  num_quantizers = 8,
                  codebook_size = 1024,
                  codebook_dim = 512,
+                 vq_cutoff_freq = 1,
                  vq_type = "base",
                  strides = (2, 4, 5, 8),
                  input_format = "b l c",
                  channel_multiplier = 2,
                  norm = torch.nn.Identity,
                  zero_center = False,
-                 depthwise = False):
+                 depthwise = False,
+                 use_energy_transformer = False,
+                 n_heads = 8,
+                 context_length = 225, # 72000 / 320, input length divided by downsample factor
+                 ):
         
         super().__init__()
         self.in_channels = in_channels
         self.n_blocks = n_blocks
         self.n_layers_per_block = n_layers_per_block
         self.num_quantizers = num_quantizers
+        self.vq_cutoff_freq = vq_cutoff_freq
         self.zero_center = zero_center
+        self.use_energy_transformer = use_energy_transformer
 
         self.codebook_dim = codebook_dim
-        self.codebook_size = tuple_checker(codebook_size, n_blocks)
+        self.codebook_size = tuple_checker(codebook_size, num_quantizers)
         self.strides = tuple_checker(strides, n_blocks)
 
-        self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
-                                           dim = codebook_dim, 
-                                           quantizer_class = vq_type, 
-                                           codebook_sizes = codebook_size)
+        if self.use_energy_transformer:
+            self.quantizer = EnergyTransformer(codebook_dim,
+                                               codebook_dim,
+                                               n_heads = n_heads,
+                                               context_length = context_length,
+                                               n_iters_default = num_quantizers)
+        else:
+            self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
+                                            dim = codebook_dim, 
+                                            quantizer_class = vq_type, 
+                                            codebook_sizes = codebook_size,
+                                            vq_cutoff_freq = vq_cutoff_freq)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 
@@ -223,7 +239,6 @@ class CausalVQAE(torch.nn.Module):
 
         for encoder in self.encoders:
             x = encoder(x)
-
         x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
 
         x_quantized, index, commit_loss = self.quantizer(x, 
@@ -248,19 +263,68 @@ class CausalVQAE(torch.nn.Module):
             x_quantized = x_quantized + mean
  
         return x_quantized, commit_loss, index, multiscales
+    
+    def sample(self, length = 225, device = "cuda", normal_var = 5e3, n_iters = 12):
+        self.to(device)
+        self.eval()
+        with torch.no_grad():
+            if self.use_energy_transformer:
+                x = torch.randn(1, length, self.codebook_dim).to(device) * normal_var
+                x, _, _= self.quantizer(x, n_iters = n_iters)
+            else:
+                x = 0
+                for i in range(self.num_quantizers):
+                    x_i= torch.randint(0, self.codebook_size,
+                                        (1, length)).to(device)
+                    x_i = self.quantizer.quantizers[i].dequantize(x_i)
+                    x += x_i
 
+            x = einops.rearrange(x, "b l c -> b c l" )
 
+            for decoder in self.decoders:
+                # each decoder takes the quantized from the previous decoder
+                x = decoder(x)
+
+            x = self.rearrange_out(x)
+
+        self.train()
+        return x
+    
+    def replace_quantizer(self, new_quantizer):
+        self.quantizer = new_quantizer
+        if isinstance(new_quantizer, EnergyTransformer):
+            self.use_energy_transformer = True
+        else:
+            self.use_energy_transformer = False
+
+    def update_cutoff(self, new_cutoff = None, ratio = None):
+        self.quantizer.update_cutoff(new_cutoff = new_cutoff, ratio = ratio)
+ 
+
+# note with input length 72000, latent dim with default params is 225 (stride factor 320)
 #TODO : try varying codebooks sizes and dims
 if __name__ == "__main__":
     import os
     from tqdm import tqdm
     import matplotlib.pyplot as plt
+    from IPython.display import Audio
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = CausalVQAE(1, input_format = "n c l").to(device)
+    #model = CausalVQAE(1, input_format = "n c l").to(device)
 
-    x = torch.randn(8, 1, 72000).to(device)
-    y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
+    #x = torch.randn(8, 1, 72000).to(device)
+    #y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
+
+    model = CausalVQAE(1, 
+                    num_quantizers = 8, 
+                    codebook_size = 1024, 
+                    input_format = "n c l",
+                    use_energy_transformer = True,)
+    
+    model.load_state_dict(torch.load("C:/Projects/singing_models/energy_t/model_epoch_9.pt"))
+
+    y = model.sample()
+    Audio(y[0].detach().cpu().numpy(), rate = 16000)
 
 
 

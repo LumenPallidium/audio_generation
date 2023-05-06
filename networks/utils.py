@@ -1,8 +1,14 @@
 import torch
 import matplotlib.pyplot as plt
 import os
+import numpy as np
+import torchaudio
 
 #TODO: add a function for weight and spectral normalization here
+
+def np_softmax(lis):
+    """A softmax function that works on numpy arrays"""
+    return np.exp(lis) / np.sum(np.exp(lis))
 
 def add_util_norm(module, norm = "weight", **norm_kwargs):
     """Adds a norm from torch.nn.utils to a module"""
@@ -110,12 +116,12 @@ def losses_to_running_loss(losses, alpha = 0.95):
 
 def get_latest_file(path, name):
     """Util to get the most recent model checkpoints easily."""
-    files = [os.path.join(path, f) for f in os.listdir(path) if name in f]
     try:
+        files = [os.path.join(path, f) for f in os.listdir(path) if name in f]
         file = max(files, key = os.path.getmtime)
         # replacing backslashes with forward slashes for windows
         file = file.replace("\\","/")
-    except ValueError:
+    except (ValueError, FileNotFoundError):
         file = None
     return file
 
@@ -128,3 +134,18 @@ def tuple_checker(item, length):
     elif isinstance(item, (tuple, list)):
         assert len(item) == length, f"Expected tuple of length {length}, got {len(item)}"
     return item
+
+def get_dataset(name, path):
+    if name == "librispeech":
+        # "C:/Projects/librispeech/"
+        dataset = torchaudio.datasets.LIBRISPEECH(path, url="train-clean-100", download=True)
+    elif name == "commonvoice":
+        # "C:/Projects/common_voice/"
+        dataset = torchaudio.datasets.COMMONVOICE(path)
+        # update to wavs
+        dataset._ext_audio = ".wav"
+
+    else:
+        raise ValueError(f"Dataset {name} not recognised")
+    
+    return dataset

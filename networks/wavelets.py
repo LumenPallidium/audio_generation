@@ -10,7 +10,9 @@ class WaveletLayer(torch.nn.Module):
     decoders."""
     def __init__(self,
                  in_channels,
+                 hidden_channels,
                  out_channels,
+                 out_conv_kernel_size = 7,
                  scale_factor = 2,
                  n_points = 10,
                  interval = (-5, 5),):
@@ -22,8 +24,9 @@ class WaveletLayer(torch.nn.Module):
         self.n_points = n_points
         self.scale_factor = scale_factor
 
-        self.conv = torch.nn.Conv1d(in_channels, out_channels, 1, padding = "same")
-        self.conv_center = torch.nn.Conv1d(in_channels, out_channels, 1, padding = "same")
+        self.conv = torch.nn.Conv1d(in_channels, hidden_channels, 1, padding = "same")
+        self.conv_center = torch.nn.Conv1d(hidden_channels, hidden_channels, 1, padding = "same")
+        self.conv_out = torch.nn.Conv1d(hidden_channels, out_channels, out_conv_kernel_size, padding = "same")
 
         self.space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
         self.f_i = 1 / torch.sqrt(torch.log(torch.tensor(2)))
@@ -38,12 +41,14 @@ class WaveletLayer(torch.nn.Module):
         #y = einops.rearrange(y, "b c (n f) d -> b c n (d f)", f = n_folds)
         y = einops.reduce(y, "b c (h block) (w f) -> b c (h block w)", "sum", 
                           block = self.scale_factor, f=fold_dim)
+        
+        y = self.conv_out(y)
         return y
 
 if __name__ == "__main__":
     from tqdm import tqdm
-    test_iterations = 10000
-    waver = WaveletLayer(1, 1)
+    test_iterations = 1000
+    waver = WaveletLayer(1, 3, 1)
     optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
 
     x = torch.linspace(0, 2 * torch.pi, 100)

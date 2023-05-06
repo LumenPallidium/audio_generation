@@ -8,7 +8,7 @@ from IPython.display import Audio
 
 import utils
 from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
-from vae import CausalVQAE
+from vae import CausalVQAE, EnergyTransformer, ResidualQuantizer
 
 class WarmUpScheduler(object):
     """Copilot wrote this, made some small tweaks though."""
@@ -89,15 +89,16 @@ class Trainer():
                  resampler = None,
                  config = "full",
                  model_path = None,
-                 model_lr = 5e-5,
-                 discriminator_lr = 2e-6,
+                 model_lr = 5e-4,
+                 discriminator_lr = 8e-4,
                  scheduler = None,
                  sample_rate = 24000,
                  discriminators = None,
                  discriminator_paths = None,
                  use_one_discriminator = False,
-                 codebook_update_step = 2,
+                 codebook_update_step = 4,
                  mini_epoch_length = 100,
+                 steps_per_epoch = None,
                  batch_size = 8,
                  spec_windows = [2 **i for i in range(5, 12)],
                  spec_bins = 64,
@@ -107,6 +108,8 @@ class Trainer():
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
+                 noise_aug_scale = 0.1,
+                 cutoff_scale_per_epoch = 0.95,
                  ):
         
         self.device = device
@@ -121,9 +124,12 @@ class Trainer():
 
         self.scheduler = scheduler
         self.dataset = dataset
+        self.model_lr = model_lr
         self.optimizers = self._init_optimizers(model_lr)
 
         self.mini_epoch_length = mini_epoch_length
+        self.steps_per_epoch = steps_per_epoch
+
         self.save_every = save_every
         self.batch_size = batch_size
         self.codebook_update_step = codebook_update_step
@@ -142,7 +148,11 @@ class Trainer():
         self.generator_loss_weight = generator_loss_weight
 
         self.loss_alpha = loss_alpha
-        self.loss_breakdown = {}
+        self.loss_breakdown = {"generator" : {},
+                               "discriminator" : {}}
+        
+        self.noise_aug_scale = noise_aug_scale
+        self.cutoff_scale_per_epoch = cutoff_scale_per_epoch
         
         # load discriminators
         self.discriminators, self.codebook_options = self._init_discriminators(discriminators, discriminator_paths, discriminator_lr)
@@ -151,6 +161,9 @@ class Trainer():
         self.mini_epoch_i = 0
 
     def _init_discriminators(self, discriminators, discriminator_paths, discriminator_lr):
+        # these help tie codebook dropout/bitrate to the discriminators
+        nq = self.model.quantizer.num_quantizers
+        
         if discriminators is not None:
             for discriminator in discriminators:
                 discriminator.to(self.device)
@@ -162,11 +175,14 @@ class Trainer():
                         discriminator.load_state_dict(torch.load(path))
                         print(f"\tLoaded discriminator from {path}")
 
-        # these help tie codebook dropout/bitrate to the discriminators
-        nq = self.model.quantizer.num_quantizers
-        nq_per_d = nq // (len(discriminators) - 1)
-        # use all for waveform d, then a fraction for each spec d, all for the final spec d
-        codebook_options = [nq] + [nq_per_d * (i + 1) for i in range(len(discriminators) - 2)] + [nq]
+
+            nq_per_d = nq // (len(discriminators) - 1)
+            # use all for waveform d, then a fraction for each spec d, all for the final spec d
+            codebook_options = [nq] + [nq_per_d * (i + 1) for i in range(len(discriminators) - 2)] + [nq]
+
+        else:
+            discriminators = None
+            codebook_options = [nq]
 
         return discriminators, codebook_options
     
@@ -188,46 +204,55 @@ class Trainer():
             os.makedirs(image_path)
         return path, image_path
     
-    def update_loss_breakdown(self, loss, loss_name):
-        if loss_name not in self.loss_breakdown:
-            self.loss_breakdown[loss_name] = loss.item()
+    def update_loss_breakdown(self, loss, loss_name, type = "generator"):
+        if loss_name not in self.loss_breakdown[type]:
+            self.loss_breakdown[type][loss_name] = loss.item()
         else:
-            self.loss_breakdown[loss_name] = loss.item() * (1 - self.loss_alpha) + self.loss_breakdown[loss_name] * self.loss_alpha
+            self.loss_breakdown[type][loss_name] = loss.item() * self.loss_alpha + self.loss_breakdown[type][loss_name] * (1 - self.loss_alpha)
 
     def print_loss_breakdown(self):
         print("\tLoss breakdown:")
-        loss_sum = sum(self.loss_breakdown.values())
-        for key, value in self.loss_breakdown.items():
-            print(f"\t\t{key}: {round(value, 2)} ({round(100 * value / loss_sum, 2)}%)")
+        for type in ["generator", "discriminator"]:
+            print(f"\t\t{type}:")
+            loss_sum = sum(self.loss_breakdown[type].values())
+            for key, value in self.loss_breakdown[type].items():
+                print(f"\t\t\t{key}: {round(value, 2)} ({round(100 * value / loss_sum, 2)}%)")
 
     def mini_epoch(self,
                     data_loader_iter,
                     losses = None,
-                    accumulation_steps = 2,
+                    accumulation_steps = 8,
                     prioritize_early = False,
                     gan_loss = True,
                     multispectral = True,
                     multiscale = True,
                     use_reconstruction_loss = True,
                     save_plots = True,
-                    sparsity_weight = 0.01,):
+                    sparsity_weight = 0.01,
+                    use_commit_loss = True,
+                    discriminator_energies = None,):
         """Executes a mini-epoch. Can be as part of a GAN etc."""
         optimizer = self.optimizers[0]
         if gan_loss:
             if self.use_one_discriminator:
+                # weight the discriminators to favor those that are doing poorly or well (but not middle)
+                if discriminator_energies is None:
+                    discriminator_energies = [1] * len(self.discriminators)
+                probs = utils.np_softmax(discriminator_energies)
+
                 # only one at a time
-                discriminator_number = np.random.randint(0, len(self.discriminators))
+                discriminator_number = np.random.choice(len(self.discriminators), p = probs)
                 discriminator = [self.discriminators[discriminator_number]]
                 optimizer_d = [self.optimizers[discriminator_number + 1]]
 
                 # chosen discriminator determines bitrate
                 codebook_n = self.codebook_options[discriminator_number]
             else:
-                codebook_n = np.random.randint(1, len(self.model.num_quantizers))
+                codebook_n = self.model.num_quantizers
                 discriminator = self.discriminators
                 optimizer_d = self.optimizers[1:]
         else:
-            codebook_n = np.random.randint(1, len(self.model.num_quantizers))
+            codebook_n = np.random.randint(1, self.model.num_quantizers + 1)
         
         for i in range(self.mini_epoch_length // accumulation_steps):
             optimizer.zero_grad()
@@ -246,13 +271,16 @@ class Trainer():
                 x = next(data_loader_iter)
                 x = torch.vstack(x).unsqueeze(1).to(self.device)
 
-                y, commit_loss, _, multiscales = self.model(x, 
+                if self.noise_aug_scale:
+                    x_ = x + torch.randn_like(x) * self.noise_aug_scale
+                else:
+                    x_ = x
+
+                y, commit_loss, _, multiscales = self.model(x_, 
                                                             multiscale = multiscale, 
                                                             update_codebook = update_codebook, 
                                                             prioritize_early = prioritize_early,
                                                             codebook_n = codebook_n)
-
-                self.update_loss_breakdown(commit_loss, "commit_loss")
 
                 if use_reconstruction_loss:
                     if multiscale:
@@ -266,14 +294,16 @@ class Trainer():
                 else:
                     loss = 0
 
+                if (not self.model.use_energy_transformer) and (use_commit_loss):
+                    self.update_loss_breakdown(commit_loss, "commit_loss")
+                    loss += commit_loss
+
                 # waveforms are typically somewhat sparse (silence, etc)
                 if sparsity_weight > 0:
                     sparsity_loss = sparsity_weight * (y.abs()).mean()
                     self.update_loss_breakdown(sparsity_loss, "sparsity_loss")
                     loss += sparsity_loss
-
-
-                loss += commit_loss
+                
                 if multispectral:
                     multispectral_loss = multispectral_reconstruction_loss(x, y,
                                                               self.spectrograms, 
@@ -287,17 +317,16 @@ class Trainer():
                     discriminator_loss = 0
                     for discriminator_i in discriminator:
                         generator_loss, discriminator_loss_i = discriminator_generator_loss(x, y, discriminator_i)
-                        self.update_loss_breakdown(generator_loss, "generator_loss")
+                        self.update_loss_breakdown(generator_loss, f"{discriminator_i.name}_g_loss")
                         loss += generator_loss * self.generator_loss_weight
 
                         discriminator_loss += discriminator_loss_i
 
-                    discriminator_loss /= (accumulation_steps / self.generator_loss_weight)
+                    discriminator_loss *=  self.generator_loss_weight
+                    self.update_loss_breakdown(discriminator_loss, f"{discriminator_i.name}_loss", type = "discriminator")
                     discriminator_loss.backward(retain_graph = True)
 
-                loss /= accumulation_steps
                 loss.backward()
-
 
             if losses is not None:
                 losses.append(loss.item())
@@ -315,10 +344,22 @@ class Trainer():
                          self.mini_epoch_i, 
                          self.image_save_path, 
                          sample_rate = self.sample_rate)
+        
+        if gan_loss:
+            discriminator_energies = []
+            mean_energy = sum(self.loss_breakdown["discriminator"].values()) / len(self.loss_breakdown["discriminator"].values())
+            for discriminator_i in self.discriminators:
+                try:
+                    energy = self.loss_breakdown["discriminator"][f"{discriminator_i.name}_g_loss"]
+                    discriminator_energies.append(energy)
+                except KeyError:
+                    discriminator_energies.append(mean_energy)
+        else:
+            discriminator_energies = None
 
         self.mini_epoch_i += 1
 
-        return y
+        return y, discriminator_energies
 
 
     def train(self, epochs = 5, 
@@ -327,15 +368,21 @@ class Trainer():
               multispectral = True, 
               multiscale = True, 
               use_reconstruction_loss = True,
-              sparsity_weight = 0.01):
+              sparsity_weight = 0.01,
+              use_commit_loss = True,
+              d_energies = None):
 
         n_steps = len(self.dataset)
-        
+        if self.steps_per_epoch is not None:
+            n_steps = min(n_steps, self.steps_per_epoch)
+
         n_mini_epochs = n_steps // (self.mini_epoch_length * self.batch_size)
+
 
         for epoch in range(epochs):
             epoch_losses = []
-            epoch_start_stale_clusters = self.model.quantizer.get_stale_clusters()
+            if not self.model.use_energy_transformer:
+                epoch_start_stale_clusters = self.model.quantizer.get_stale_clusters()
             # reset the data loader each epoch
             train_loader = torch.utils.data.DataLoader(self.dataset,
                                                        batch_size=self.batch_size,
@@ -345,21 +392,25 @@ class Trainer():
             train_loader_iter = iter(train_loader)
 
             for mini_epoch_i in tqdm(range(n_mini_epochs)):
-                y = self.mini_epoch(train_loader_iter, 
+                y, d_energies = self.mini_epoch(train_loader_iter, 
                                     losses = epoch_losses,
                                     gan_loss = gan_loss,
                                     use_reconstruction_loss = use_reconstruction_loss,
                                     multispectral = multispectral,
                                     multiscale = multiscale,
-                                    sparsity_weight = sparsity_weight)
-
-            epoch_end_stale_clusters = model.quantizer.get_stale_clusters()
+                                    sparsity_weight = sparsity_weight,
+                                    use_commit_loss = use_commit_loss,
+                                    discriminator_energies = d_energies,)
+                
+            self.model.update_cutoff(ratio = self.cutoff_scale_per_epoch)
 
             torchaudio.save(self.save_path + f"epoch_{epoch}_sample.wav", y[0].detach().cpu(), self.sample_rate)
 
             print(f"Epoch {self.epoch} mean loss: ", np.mean(epoch_losses))
             self.print_loss_breakdown()
-            utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
+            if not self.model.use_energy_transformer:
+                epoch_end_stale_clusters = model.quantizer.get_stale_clusters()
+                utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
 
             if epoch % self.save_every == 0:
                 torch.save(self.model.state_dict(), self.save_path + f"model_epoch_{self.epoch}.pt")
@@ -438,10 +489,11 @@ class Trainer():
 
         return y[0].detach().cpu()
     
-    def sample(self):
+    def sample_data(self):
         i = np.random.randint(0, len(self.dataset))
-        x = self.dataset[i].to(self.device)
+        x = self.dataset[i]
         x = utils.collator([x], resampler=self.resampler)[0]
+        x = x.to(self.device).unsqueeze(0)
 
         model.eval()
         with torch.no_grad():
@@ -451,6 +503,25 @@ class Trainer():
         model.train()
         Audio(y[0].detach().cpu().numpy(), rate = self.sample_rate)
 
+    def train_new_quantizer(self, 
+                            new_quantizer, 
+                            slow_lr = 1e-6,
+                            new_experiment_path = None,
+                            **train_kwargs):
+        new_quantizer.to(self.device)
+        self.model.replace_quantizer(new_quantizer)
+
+        # set encoder and decoder learning rates very low
+        optimizer = torch.optim.Adam([{"params": self.model.encoders.parameters(), "lr": slow_lr},
+                                      {"params": self.model.decoders.parameters(), "lr": slow_lr},
+                                      {"params": self.model.quantizer.parameters(), "lr": self.model_lr}])
+        self.optimizers[0] = optimizer
+
+        if new_experiment_path:
+            self.save_path, self.image_save_path = self._init_paths(save_path)
+
+        
+        self.train(**train_kwargs)
 
 
 #TODO : look into quantizer with extensible codebook
@@ -459,6 +530,7 @@ class Trainer():
 #TODO : maybe look into loss balancer like encodec uses
 #TODO : maybe add funtionality for selecting existing experiment
 #TODO : maybe add function to continue epochs from existing experiment
+#TODO : make discriminator energy calcs a method or something
 if __name__ == "__main__":
 
     # update these if running on your end
@@ -466,13 +538,18 @@ if __name__ == "__main__":
     experiment_name = "default_experiment" if experiment_name == "" else experiment_name
     save_path = "C:/Projects/singing_models/" + experiment_name + "/"
     dataset_path = "C:/Projects/librispeech/"
-    sample_rate = 16000
+    sample_rate = 48000
 
     use_discriminator = True
     scratch_train = False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = CausalVQAE(1, num_quantizers = 8, codebook_size = 1024, input_format = "n c l")
+    model = CausalVQAE(1, 
+                       num_quantizers = 8, 
+                       codebook_size = 1024, 
+                       input_format = "n c l",
+                       use_energy_transformer = False,
+                       vq_cutoff_freq=0.5)
 
     #resampler = torchaudio.transforms.Resample(16000, 24000)
     if not scratch_train:
@@ -496,33 +573,45 @@ if __name__ == "__main__":
         else:
             for discriminator in discriminators:
                 latest_d_paths.append(utils.get_latest_file(save_path, discriminator.name))
+    else:
+        discriminators = None
+        latest_d_paths = None
 
 
-    librispeech = torchaudio.datasets.LIBRISPEECH(dataset_path, url="train-clean-100", download=True)
-    scheduler = WarmUpScheduler(torch.optim.Adam(model.parameters(), lr = 8e-5, amsgrad = True), 
+    dataset = utils.get_dataset("commonvoice", "C:/Projects/common_voice/")
+    scheduler = WarmUpScheduler(torch.optim.Adam(model.parameters(), lr = 8e-4, amsgrad = True), 
                                 torch.optim.lr_scheduler.CosineAnnealingLR, 
-                                warmup_iter = 10)
+                                warmup_iter = 100)
     losses = []
 
     trainer = Trainer(device, 
                       save_path,
                       model, 
-                      librispeech,
+                      dataset,
                       #resampler = resampler,
+                      batch_size = 8,
                       scheduler = scheduler,
                       model_path = latest_model_path,
                       discriminators = discriminators,
                       discriminator_paths = latest_d_paths,
                       use_one_discriminator = True,
                       sample_rate = sample_rate,
+                      generator_loss_weight = 4,
+                      reconstruction_loss_weight = 10,
+                      codebook_update_step = 1,
+                      steps_per_epoch = 30000,
+                      noise_aug_scale = 0,
                       )
     
     #trainer.om_overtrain()
-    losses = trainer.train(epochs = 5, losses = losses, 
+    losses = trainer.train(epochs = 10, losses = losses, 
                            gan_loss = use_discriminator,
                            use_reconstruction_loss = True,
                            multiscale = False, 
-                           sparsity_weight = 0)
+                           sparsity_weight = 0,
+                           use_commit_loss = True,)
+
+
     #y = trainer.overtrain()
     #Audio(y.numpy(), rate = 16000)
 
