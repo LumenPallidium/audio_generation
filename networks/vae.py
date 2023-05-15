@@ -146,7 +146,7 @@ class CausalDecoderBlock(torch.nn.Module):
     
 class CausalVQAE(torch.nn.Module):
     def __init__(self,
-                 in_channels,
+                 in_channels = 1,
                  n_blocks = 4,
                  n_layers_per_block = 4,
                  first_block_channels = 32,
@@ -310,19 +310,17 @@ if __name__ == "__main__":
     from IPython.display import Audio
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    #model = CausalVQAE(1, input_format = "n c l").to(device)
+    #model = CausalVQAE(in_channels = 1, input_format = "n c l").to(device)
 
     #x = torch.randn(8, 1, 72000).to(device)
     #y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
 
-    model = CausalVQAE(1, 
+    model = CausalVQAE(in_channels = 1, 
                     num_quantizers = 8, 
                     codebook_size = 1024, 
                     input_format = "n c l",
                     use_energy_transformer = True,)
     
-    model.load_state_dict(torch.load("C:/Projects/singing_models/energy_t/model_epoch_9.pt"))
-
     y = model.sample()
     Audio(y[0].detach().cpu().numpy(), rate = 16000)
 

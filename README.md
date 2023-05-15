@@ -1,12 +1,25 @@
 ## Introduction
 
+(Note: I'm currently taking a break from this project to work on some self-supervised learning and neuroevolution projects. I'll probably resume later)
+
 This is a repo for audio generation models. It is in some sense incomplete at the moment, though running the training script in the networks folder will create an autoencoder for audio generation. Nonetheless, there are still many to-dos and updates, as the generation quality is not ideal currently.
+
+If you are interested in a general implementation of Soundstream or a neural audio codec, you should probably check out lucidrain's [implementation](https://github.com/lucidrains/audiolm-pytorch) or Facebook/Meta's [encodec](https://github.com/facebookresearch/encodec). While I used ideas from neural audio codecs, this repository also contains my experiments with audio generation. These ideas may be interesting:
+
+* I explored the use of wavelets for audio generation, which atm is not going as well as I hoped. Nonetheless, I think the idea could bear fruit, in particular, by allowing generation of speech chunks using less parameters in the decoder and by implicitly approximation the fundamental frequency of the input dataset without using expensive operations like CQT.
+* This repository contains an implementation of [energy transformers](https://openreview.net/pdf?id=4nrZXPFN1c4), which may be the only Pytorch implementation at the moment. The jax implementation [can be found here](https://github.com/bhoov/energy-transformer-jax). Also included in this repository is an extensive test of the energy transformer, which includes the full self-supervised masked image reconstruction training used in the paper (except on CIFAR instead of Imagenet for speed).
 
 
 ## Acknowledgements
 The work of Phil Wang [(lucidrains)](https://github.com/lucidrains) was important both as a reference and for some functions. While this repo was mostly developed independently, a number of key steps were drawn from his work, most notably in the structure of "causal" convolution layers. Additionally, reference was made to the [encodec](https://github.com/facebookresearch/encodec) repo from Facebook Research, which were referenced for further improving the causal convolution layers. Additionally, reference
 was made to OpenAI's Jukebox model and rosinality's VQ-VAE for building the 
 VQ-VAE layers.
+
+## Running This
+
+The main parameters you might want to control are in the config/training.yml file. I prefer using configs to CLI arguments, so argparse etc are not implemented.
+
+See environment.yml for the package details. It's probably better as a guideline. An important thing to mention is that you should use the latest Pytorch versions, as I do use torch.func for the energy transformers (need to take gradients, differentiably).
 
 ## The Generative Model
 
@@ -18,13 +31,15 @@ As of this writing, the main differences between this implementation and the ori
 
 * Different parameters in general
 * A new optional optimizer objective: the channel average of the layer activations for the transpose convolution steps should approximate the signal downsampled to the same size
+* Addition of some objectives from encodec, such as using more discriminators and multispectral windows
+* The STFT discriminators don't act over complex numbers, they are in a 2-channel real domain (this ran much better on older versions of PyTorch, it's likely no longer neccesary)
+* The option to use an energy-transformer as a bottleneck layer. This is a Hopfield inspired model that has some similarity to residual vector quantization - unlike a traditional transformer, the residual of the input is repeatedly run through the network (which fulfills the process of energy minimization). This bottleneck led to a much stronger model than the using RVQ.
+* The discriminator has a term adding stronger repulsion between fake and real inputs. I found that the default hinge loss led to discriminator collapse (i.e. the discriminator returned the same value for all inputs, real or fake)
+* I added the option to allow using only 1 discriminator at a time - which I found significantly improved speed without harming quality.
 
-Some training tips:
+## Random Notes
 
-* A low learning rate seems neccesary here - the model has devolved into producing noise consistently when LRs are high
-* I implemented a number of methods to learn on curriculums, though can only tentatively say they were helpful at this point. These steps include weighting different loss scales depending on the epoch (e.g. early on the model should focus on learning to match the downsampled waveform, spending less time worried about details)
+* The convert_to_wav script was useful for converting mp3s to wavs cause Soundfile on windows can't open mp3s as tensors 🫠
 
-Some additional thoughts:
 
-* If we have a a good amount of metadata (e.g. genre) we could try a VQ-VAE approach where we have a quantization layer from the latent space to the metadata space. This would allow us to generate new audio conditioned on metadata. Likely would want a quantization layer for each type of metadata, with codebook size equal to the number of classes.
-* Left-brain/right-brain approach : an oft-repeated simplification is that the human left hemisphere is details-oriented while the right hemisphere is "big picture" oriented. One supporting piece of evidence used for this is that damage to the left inferior frontal gyrus (Broca's area) leads to people losing the ability to produce sentences (the "details"). They can still convey feeling vocally though ("prosody") and can still vocalize emotional state through pitch. On the other hand, damage to the right inferior frontal gyrus preserves speech ability, but leads to a monotone voice and difficulty conveying emotion. I wonder if splitting the network into two components (one focused on details, the other on overall melodic content) could be advantageous.
+

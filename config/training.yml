@@ -1,0 +1,35 @@
+experiment_name : "default_experiment"
+save_path_root : "C:/Projects/singing_models/"
+dataset : "commonvoice" # see utils.get_dataset for available datasets & examples
+dataset_path : "C:/Projects/common_voice/"
+sample_rate : 48000
+
+use_discriminator : True
+scratch_train : False
+
+lr : 0.0008
+scheduler_warmup : 100 # most scheduler params are hardcoded atm
+
+vae_args : # args for the vae
+  in_channels : 1 
+  num_quantizers : 8
+  codebook_size : 1024
+  input_format : "n c l"
+  use_energy_transformer : False
+  vq_cutoff_freq : 0.5
+
+trainer_args : # these are global args for the trainer
+  batch_size : 8
+  use_one_discriminator : True
+  generator_loss_weight : 4
+  reconstruction_loss_weight : 10
+  codebook_update_step : 1
+  steps_per_epoch: 30000
+  noise_aug_scale : 0
+
+train_run_args : # these are args for a single run
+  epochs : 10
+  use_reconstruction_loss : True
+  multiscale : False
+  sparsity_weight : 0
+  use_commit_loss : True

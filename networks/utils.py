@@ -139,13 +139,15 @@ def get_dataset(name, path):
     if name == "librispeech":
         # "C:/Projects/librispeech/"
         dataset = torchaudio.datasets.LIBRISPEECH(path, url="train-clean-100", download=True)
+        sample_rate = 16000
     elif name == "commonvoice":
         # "C:/Projects/common_voice/"
         dataset = torchaudio.datasets.COMMONVOICE(path)
         # update to wavs
         dataset._ext_audio = ".wav"
+        sample_rate = 48000
 
     else:
         raise ValueError(f"Dataset {name} not recognised")
     
-    return dataset
+    return dataset, sample_rate

@@ -5,7 +5,7 @@ import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from IPython.display import Audio
-
+import yaml
 import utils
 from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
 from vae import CausalVQAE, EnergyTransformer, ResidualQuantizer
@@ -362,7 +362,8 @@ class Trainer():
         return y, discriminator_energies
 
 
-    def train(self, epochs = 5, 
+    def train(self, 
+              epochs = 5, 
               losses = None, 
               gan_loss = True, 
               multispectral = True, 
@@ -429,32 +430,8 @@ class Trainer():
 
         return losses
 
-    def om_overtrain(self, batches = 16,  n_steps = 10000):
-        """Overtrains on the OM sound for good luck."""
-        om = torchaudio.load(r"om.wav")[0]
-        om = om.mean(dim = 0, keepdim = True).to(self.device)
-        om = om.repeat(batches, 1, 1)
-
-        om_optimizer = torch.optim.Adam(model.parameters(), lr = 3e-4)
-
-        losses_om = []
-        for step in tqdm(range(n_steps // batches)):
-            y, commit_loss, index, multiscales = self.model(om, update_codebook = True, multiscale = True)
-
-            loss = torch.mean((y - om).pow(2)) + commit_loss
-            losses_om.append(loss.item())
-
-            om_optimizer.zero_grad()
-            loss.backward()
-            om_optimizer.step()
-
-            if step % 100 == 0:
-                utils.plot_waveform(y[0].detach().cpu(), 16000, save_path = "C:/Projects/test_om.png")
-
-        plt.plot(utils.losses_to_running_loss(losses_om))
-
     def overtrain(self, batch_size = 16, n_steps = 5000):
-        """Overtrains on a single sample from the data."""
+        """Overtrains on a single sample from the data. Used for testing."""
         def param_sum(model):
             return sum(p.sum() for p in model.parameters() if p.requires_grad)
 
@@ -508,6 +485,9 @@ class Trainer():
                             slow_lr = 1e-6,
                             new_experiment_path = None,
                             **train_kwargs):
+        """Trains a new bottleneck with the existing model. The encoder and decoder
+        learn at a slower rate (which can be 0) determined by slow_lr. Relies on trainer.train()
+        so all of the same arguments can be passed in."""
         new_quantizer.to(self.device)
         self.model.replace_quantizer(new_quantizer)
 
@@ -532,32 +512,40 @@ class Trainer():
 #TODO : maybe add function to continue epochs from existing experiment
 #TODO : make discriminator energy calcs a method or something
 if __name__ == "__main__":
-
-    # update these if running on your end
-    experiment_name = input("Please enter an experiment name:")
-    experiment_name = "default_experiment" if experiment_name == "" else experiment_name
-    save_path = "C:/Projects/singing_models/" + experiment_name + "/"
-    dataset_path = "C:/Projects/librispeech/"
-    sample_rate = 48000
-
-    use_discriminator = True
-    scratch_train = False
+    config = yaml.safe_load(open("../config/training.yml", "r"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = CausalVQAE(1, 
-                       num_quantizers = 8, 
-                       codebook_size = 1024, 
-                       input_format = "n c l",
-                       use_energy_transformer = False,
-                       vq_cutoff_freq=0.5)
+    # update these if running on your end
+    if config["experiment_name"] == "default_experiment":
+        experiment_name = input("Please enter an experiment name (or nothing to make it default_experiment):")
+        experiment_name = "default_experiment" if experiment_name == "" else experiment_name
+    else:
+        experiment_name = config["experiment_name"]
 
-    #resampler = torchaudio.transforms.Resample(16000, 24000)
+    save_path = config["save_path_root"] + experiment_name + "/"
+    dataset_path = config["dataset_path"]
+    sample_rate = config["sample_rate"]
+
+    dataset, data_sample_rate = utils.get_dataset(config["dataset"], 
+                                                  config["dataset_path"])
+    
+    if data_sample_rate != sample_rate:
+        resampler = torchaudio.transforms.Resample(data_sample_rate, sample_rate)
+    else:
+        resampler = None
+
+    use_discriminator = config["use_discriminator"]
+    scratch_train = config["scratch_train"]
+    
+    model = CausalVQAE(**config["vae_args"])
+
     if not scratch_train:
         latest_model_path = utils.get_latest_file(save_path, "model")
     else:
         latest_model_path = None
 
     if use_discriminator:
+        # TODO: unhardcode these? otoh they match the paper
         discriminators = [WaveFormDiscriminator(1)]
         discriminators += [STFTDiscriminator(win_length = win) for win in [2048, 
                                                                            1024, 
@@ -577,41 +565,27 @@ if __name__ == "__main__":
         discriminators = None
         latest_d_paths = None
 
-
-    dataset = utils.get_dataset("commonvoice", "C:/Projects/common_voice/")
-    scheduler = WarmUpScheduler(torch.optim.Adam(model.parameters(), lr = 8e-4, amsgrad = True), 
+    
+    scheduler = WarmUpScheduler(torch.optim.Adam(model.parameters(), 
+                                                 lr = config["lr"], 
+                                                 amsgrad = True), 
                                 torch.optim.lr_scheduler.CosineAnnealingLR, 
-                                warmup_iter = 100)
+                                warmup_iter = config["scheduler_warmup"])
     losses = []
 
     trainer = Trainer(device, 
                       save_path,
                       model, 
                       dataset,
-                      #resampler = resampler,
-                      batch_size = 8,
+                      sample_rate = sample_rate,
+                      resampler = resampler,
                       scheduler = scheduler,
                       model_path = latest_model_path,
                       discriminators = discriminators,
                       discriminator_paths = latest_d_paths,
-                      use_one_discriminator = True,
-                      sample_rate = sample_rate,
-                      generator_loss_weight = 4,
-                      reconstruction_loss_weight = 10,
-                      codebook_update_step = 1,
-                      steps_per_epoch = 30000,
-                      noise_aug_scale = 0,
+                      **config["trainer_args"]
                       )
     
-    #trainer.om_overtrain()
-    losses = trainer.train(epochs = 10, losses = losses, 
+    losses = trainer.train(losses = losses, 
                            gan_loss = use_discriminator,
-                           use_reconstruction_loss = True,
-                           multiscale = False, 
-                           sparsity_weight = 0,
-                           use_commit_loss = True,)
-
-
-    #y = trainer.overtrain()
-    #Audio(y.numpy(), rate = 16000)
-
+                           **config["train_run_args"])
