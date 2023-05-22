@@ -8,7 +8,13 @@ from IPython.display import Audio
 import yaml
 import utils
 from discriminator import discriminator_generator_loss, WaveFormDiscriminator, STFTDiscriminator
-from vae import CausalVQAE, EnergyTransformer, ResidualQuantizer
+from vae import CausalVQAE, ResidualQuantizer
+try:
+    from energy_transformer import EnergyTransformer
+    ET_AVAILABLE = True
+except ImportError:
+    ET_AVAILABLE = False
+    print("EnergyTransformer not available. See the readme if you want to install it.")
 
 class WarmUpScheduler(object):
     """Copilot wrote this, made some small tweaks though."""

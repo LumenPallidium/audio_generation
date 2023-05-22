@@ -4,7 +4,12 @@ import einops
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
 from utils import add_util_norm
-from energy_transformers import EnergyTransformer
+try:
+    from energy_transformer import EnergyTransformer
+    ET_AVAILABLE = True
+except ImportError:
+    ET_AVAILABLE = False
+    print("EnergyTransformer not available. See the readme if you want to install it.")
 
 # the causal convolution layers were initially modified from:
 # https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
@@ -179,7 +184,7 @@ class CausalVQAE(torch.nn.Module):
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
         self.strides = tuple_checker(strides, n_blocks)
 
-        if self.use_energy_transformer:
+        if ET_AVAILABLE and self.use_energy_transformer:
             self.quantizer = EnergyTransformer(codebook_dim,
                                                codebook_dim,
                                                n_heads = n_heads,
