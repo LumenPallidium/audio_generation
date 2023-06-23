@@ -67,6 +67,7 @@ class CausalConvT1d(torch.nn.Module):
         pad = x.shape[-1] - self.right_pad
         return x[..., :pad]
     
+    
 class CausalResidualBlock1d(torch.nn.Module):
     """A residual block with causal convolutions. Standard convolution followed by kernel = 1 convolution."""
     def __init__(self, 
@@ -235,7 +236,7 @@ class CausalVQAE(torch.nn.Module):
         self.encoders = torch.nn.ModuleList(encoders)
         self.decoders = torch.nn.ModuleList(decoders)
 
-    def forward(self, x, update_codebook = False, codebook_n = None, multiscale = False, prioritize_early = False):
+    def forward(self, x, update_codebook = False, codebook_n = None, prioritize_early = False):
         if self.zero_center:
             mean = x.mean(dim = -1, keepdim = True).detach()
             x = x - mean
@@ -254,20 +255,16 @@ class CausalVQAE(torch.nn.Module):
         x_quantized = einops.rearrange(x_quantized,
                                         "b l c -> b c l" )
 
-        multiscales = []
         for decoder in self.decoders:
             # each decoder takes the quantized from the previous decoder
             x_quantized = decoder(x_quantized)
-            # multiscale forces the average (over channels) to be close to the original
-            if multiscale:
-                multiscales.append(x_quantized.mean(dim = 1, keepdim = True))
 
         x_quantized = self.rearrange_out(x_quantized)
 
         if self.zero_center:
             x_quantized = x_quantized + mean
  
-        return x_quantized, commit_loss, index, multiscales
+        return x_quantized, commit_loss, index
     
     def sample(self, length = 225, device = "cuda", normal_var = 5e3, n_iters = 12):
         self.to(device)

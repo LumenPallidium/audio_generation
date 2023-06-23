@@ -2,6 +2,7 @@ import torch
 import einops
 import numpy as np
 import matplotlib.pyplot as plt
+from math import ceil, sqrt
 
 class WaveletLayer(torch.nn.Module):
     def __init__(self,
@@ -57,18 +58,98 @@ class WaveletLayer(torch.nn.Module):
         y = self.conv_out(y)
         return y
 
+    
+def causal_functional_conv1d(x, 
+                             weight, 
+                             bias = None, 
+                             stride = 1, 
+                             dilation = 1,
+                             groups = 1):
+    """A 1D convolution which masks future inputs."""
+    kernel_size = weight.shape[-1]
+
+    # causal pad
+    pad = dilation * (kernel_size - 1) - stride + 1
+
+    length = x.shape[-1]
+    next_length = (length - kernel_size + pad) / stride + 1
+    target_length = (ceil(next_length) - 1) * stride + kernel_size - pad
+    extra_pad = target_length - length
+
+    x = torch.nn.functional.pad(x, (pad, extra_pad))
+    return torch.nn.functional.conv1d(x, weight, bias = bias, stride = stride, dilation = dilation, groups = groups)
+
+def causal_functional_conv_t1d(x, weight, bias = None, stride = 1, dilation = 1):
+    kernel_size = weight.shape[-1]
+    #TODO : think about this more
+    right_pad = dilation * (kernel_size - 1) - stride + 1
+
+    pad = x.shape[-1] - right_pad
+
+    x = torch.nn.functional.conv_transpose1d(x, weight, bias = bias, stride = stride, padding = pad, dilation = dilation)
+    return x[..., :pad]
+    
+class CausalMultiresConv1d(torch.nn.Module):
+    def __init__(self,
+                 out_channels,
+                 kernel_size,
+                 depth,
+                 dropout = 0.0,
+                 activation = torch.nn.GELU()):
+        super().__init__()
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.depth = depth
+        self.dropout = dropout
+        self.activation = activation
+
+        scalar = sqrt(2.0 / (kernel_size * 2))
+
+        # weights as described in paper
+        self.h0 = torch.nn.Parameter(torch.empty(out_channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
+        self.h1 = torch.nn.Parameter(torch.empty(out_channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
+        w = torch.empty(out_channels, depth + 2).uniform_(-1., 1.) * sqrt(2.0 / (2 * depth + 4))
+        self.w = torch.nn.Parameter(w)
+
+        self.dropout_layer = torch.nn.Dropout(dropout)
+    
+    def forward(self, x):
+        residual_low = x.clone()
+        y = 0
+        dilation = 1
+        for i in range(self.depth, 0, -1):
+            residual_high = causal_functional_conv1d(residual_low, self.h1, 
+                                                     dilation = dilation, 
+                                                     groups = residual_low.shape[1])
+            residual_low = causal_functional_conv1d(residual_low, self.h0, 
+                                                    dilation = dilation, 
+                                                    groups = residual_low.shape[1])
+
+            y += self.w[:, i:i + 1] * residual_high
+            dilation *= 2
+
+        y += self.w[:, :1] * residual_low
+        y += x * self.w[:, -1:]
+        return self.dropout_layer(self.activation(y))
+
 if __name__ == "__main__":
     from tqdm import tqdm
     import torchaudio
-    test_iterations = 1000
+    test_iterations = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    waver = WaveletLayer(1, 2).to(device)
-    optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
+    test_wavelet = False
 
     om = torchaudio.load(r"om.wav")[0]
     om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
 
+    if test_wavelet:
+        model= WaveletLayer(1, 2).to(device)
+    else:
+        model = torch.nn.Sequential(torch.nn.Conv1d(1, 32, 1, padding = "same"),
+                                    CausalMultiresConv1d(32, 21, 4),
+                                    torch.nn.Upsample(scale_factor = 2),
+                                    torch.nn.Conv1d(32, 1, 1, padding = "same")).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
 
     om = torch.nn.functional.interpolate(om, size = 224)
     x_ds = torch.nn.functional.interpolate(om, scale_factor = 0.5)
@@ -77,10 +158,10 @@ if __name__ == "__main__":
     x_hats = []
     losses = []
     for i in tqdm(range(test_iterations)):
-        noise = torch.randn_like(x_ds) * 0.1
+        noise = 0#torch.randn_like(x_ds) * 0.1
         x_i = x_ds + noise
 
-        x_hat = waver(x_i)
+        x_hat = model(x_i)
 
         loss = torch.nn.functional.mse_loss(x_hat, om)
         loss.backward()
@@ -89,8 +170,6 @@ if __name__ == "__main__":
         losses.append(loss.item())
 
     plt.plot(losses)
-    #ax.plot(x_hat.squeeze(0).squeeze(0).detach().cpu().numpy(), alpha = 0.05 * (i / test_iterations))
-    #ax.plot(om.squeeze(0).squeeze(0).detach().cpu().numpy(), color = "black")
+    
 
-    #plt.plot(x_hat.squeeze(0).squeeze(0).detach().numpy())
 

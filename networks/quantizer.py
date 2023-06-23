@@ -1,8 +1,9 @@
 import torch
 from torch.nn import functional as F
 import einops
-
-from utils import tuple_checker
+import numpy as np
+from som_utils import SOMGrid
+from utils import tuple_checker, approximate_square_root
 
 # Module for quantizers. Lots of influence from OpenAI's Jukebox VQ-VAE, rosinality's VQ-VAE, and the OG paper:
 # https://arxiv.org/pdf/1711.00937.pdf
@@ -26,7 +27,8 @@ class BaseQuantizer(torch.nn.Module):
                  alpha : float = 0.95,
                  replace_with_obs : bool = True,
                  init_scale = 1.0,
-                 new_code_noise : float = 1e-5):
+                 new_code_noise : float = 1e-5,
+                 use_som : bool = False,):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
@@ -34,6 +36,7 @@ class BaseQuantizer(torch.nn.Module):
         self.cut_freq = cut_freq
         self.replace_with_obs = replace_with_obs
         self.new_code_noise : float = new_code_noise
+        self.use_som = use_som
 
         self.stale_clusters = None
 
@@ -41,6 +44,12 @@ class BaseQuantizer(torch.nn.Module):
         self.codebook = torch.nn.Parameter(torch.randn(dim, codebook_size) * init_scale)
         # initalize a count that each codebook entry appears
         self.register_buffer("cluster_frequency", torch.ones(codebook_size))
+
+        if self.use_som:
+            h, w = approximate_square_root(self.codebook_size)
+            self.som = SOMGrid(h, w,
+                               neighbor_distance = 13,
+                               kernel_type = "gaussian")
 
 
     def quantize(self, input):
@@ -78,6 +87,9 @@ class BaseQuantizer(torch.nn.Module):
         with torch.no_grad():
             # get a one-hot encoding of the codebook index
             codebook_onehot = F.one_hot(codebook_index, self.codebook_size).type(x_flat.dtype)
+            if self.use_som:
+                codebook_onehot = self.som(codebook_onehot, update_t = update_codebook)
+
             # use that to get the count that each codebook entry has been used
             codebook_count = torch.einsum("b l c -> c", codebook_onehot)
 
@@ -92,7 +104,7 @@ class BaseQuantizer(torch.nn.Module):
             num_low_clusters = int(low_clusters.sum().item())
             self.stale_clusters = num_low_clusters
             # all clusters will be low clusters on the first run, so only update in between
-            if update_codebook & ((low_clusters.any()) and not (low_clusters.all())):
+            if update_codebook and ((low_clusters.any()) and not (low_clusters.all())):
                 
                 if verbose:
                     print(f"{num_low_clusters} clusters are poorly represented. Updating...")
@@ -175,14 +187,16 @@ class EMAQuantizer(BaseQuantizer):
                  alpha : float = 0.99, 
                  eps : float = 1e-5,
                  cut_freq : int = 2,
-                 replace_with_obs = True,
-                 init_scale = 1.0):
+                 replace_with_obs : bool = True,
+                 init_scale : float = 1.0,
+                 use_som : bool = True):
         super().__init__(dim, 
                          codebook_size, 
                          alpha = alpha, 
                          cut_freq = cut_freq, 
                          replace_with_obs = replace_with_obs,
-                         init_scale = init_scale)
+                         init_scale = init_scale,
+                         use_som = use_som)
         
         self.eps = eps
 
@@ -249,7 +263,12 @@ class ResidualQuantizer(torch.nn.Module):
 
         self.quantizers = torch.nn.ModuleList(quantizers)
 
-    def forward(self, x, n = None, update_codebook : bool = False, prioritize_early : bool = False):
+    def forward(self, 
+                x, 
+                n = None, 
+                update_codebook : bool = False, 
+                prioritize_early : bool = False,
+                decorr_loss_weight : float = 0.0):
         # can limit to first n quantizers, they call this bitrate dropout in the paper
         # if n is None, use all quantizers, for training n will typically be sampled uniformly from [1, num_quantizers]
         if n is None:
@@ -263,6 +282,15 @@ class ResidualQuantizer(torch.nn.Module):
 
         for i in range(n):
             x_i, index, inner_loss_i = self.quantizers[i](residual, update_codebook = update_codebook)
+
+            if (i > 0) and (decorr_loss_weight > 0):
+                # loss term to encourage decorrelation between quantizers
+                decorr_loss = decorr_loss_weight * torch.nn.functional.cosine_similarity(x_i, prev_x_i, dim = -1).mean()
+                decorr_loss /= (self.num_quantizers - 1)
+                inner_loss_i += decorr_loss
+            
+            prev_x_i = x_i.detach().clone()
+
             stale_clusters = self.quantizers[i].stale_clusters
 
             # prioritize early quantizers, switch off update_codebook if stale clusters exceeds threshold
@@ -301,7 +329,7 @@ if __name__ == "__main__":
     test_base = False
     test_iterations = 3000
 
-    device = "cuda"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # test the quantizers
     if test_base:

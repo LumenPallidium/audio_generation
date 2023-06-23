@@ -62,20 +62,6 @@ def multispectral_reconstruction_loss(original,
             spec_loss += alphas[i] * l2_f(original_spec, reconstruction_spec)
     return spec_loss_weight * spec_loss
 
-def multiscale_reconstruction_loss(original,
-                                   reconstructions,
-                                   scale_weights = [0.25, 0.5, 1, 1.25, 0.01, 2.99]):
-    l2_f = torch.nn.functional.mse_loss
-    downsample = torch.nn.functional.interpolate
-
-    waveform_loss = 0
-
-    for scale, reconstruction in zip(scale_weights, reconstructions):
-        size = reconstruction.shape[-1]
-        original_scaled = downsample(original, size = size)
-        waveform_loss += scale * l2_f(original_scaled, reconstruction)
-
-    return waveform_loss
 
 def save_samples(real, fake, epoch, i, path, sample_rate = 16000):
     name = path + f"sample_{epoch}_{i}.png"
@@ -231,7 +217,6 @@ class Trainer():
                     prioritize_early = False,
                     gan_loss = True,
                     multispectral = True,
-                    multiscale = True,
                     use_reconstruction_loss = True,
                     save_plots = True,
                     sparsity_weight = 0.01,
@@ -282,17 +267,14 @@ class Trainer():
                 else:
                     x_ = x
 
-                y, commit_loss, _, multiscales = self.model(x_, 
-                                                            multiscale = multiscale, 
-                                                            update_codebook = update_codebook, 
-                                                            prioritize_early = prioritize_early,
-                                                            codebook_n = codebook_n)
+                y, commit_loss, _ = self.model(x_, 
+                                               update_codebook = update_codebook, 
+                                               prioritize_early = prioritize_early,
+                                               codebook_n = codebook_n)
 
                 if use_reconstruction_loss:
-                    if multiscale:
-                        loss = multiscale_reconstruction_loss(x, multiscales)
-                    else:
-                        loss = torch.nn.functional.l1_loss(x, y)
+
+                    loss = torch.nn.functional.l1_loss(x, y)
                         
                     loss *= self.reconstruction_loss_weight
 
@@ -372,8 +354,7 @@ class Trainer():
               epochs = 5, 
               losses = None, 
               gan_loss = True, 
-              multispectral = True, 
-              multiscale = True, 
+              multispectral = True,
               use_reconstruction_loss = True,
               sparsity_weight = 0.01,
               use_commit_loss = True,
@@ -404,7 +385,6 @@ class Trainer():
                                     gan_loss = gan_loss,
                                     use_reconstruction_loss = use_reconstruction_loss,
                                     multispectral = multispectral,
-                                    multiscale = multiscale,
                                     sparsity_weight = sparsity_weight,
                                     use_commit_loss = use_commit_loss,
                                     discriminator_energies = d_energies,)
@@ -453,7 +433,7 @@ class Trainer():
 
         for step in tqdm(range(n_steps // batch_size)):
             
-            y, commit_loss, index, multiscales = self.model(x, update_codebook = True, multiscale = True)
+            y, commit_loss, index = self.model(x, update_codebook = True)
 
             loss = torch.mean((y - x).pow(2)) + commit_loss
 

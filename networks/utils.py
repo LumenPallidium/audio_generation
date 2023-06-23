@@ -3,8 +3,24 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 import torchaudio
+from sympy.ntheory import factorint
 
 #TODO: add a function for weight and spectral normalization here
+
+def approximate_square_root(x):
+    factor_dict = factorint(x)
+    factors = []
+    for key, item in factor_dict.items():
+        factors += [key] * item
+    factors = sorted(factors)
+
+    a, b = 1, 1
+    for factor in factors:
+        if a <= b:
+            a *= factor
+        else:
+            b *= factor
+    return a, b
 
 def np_softmax(lis):
     """A softmax function that works on numpy arrays"""
