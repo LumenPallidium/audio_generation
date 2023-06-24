@@ -1,5 +1,5 @@
 import torch
-import einops
+from einops.layers.torch import Rearrange
 import numpy as np
 
 #TODO : this class is unnecessary, keeping in case it's useful later
@@ -35,13 +35,13 @@ class Pairer:
     
 
 class SOMGrid(torch.nn.Module):
-
     def __init__(self, 
                  height,
                  width,
                  neighbor_distance = 1,
                  kernel_type = "gaussian",
                  time_constant = 0.1):
+        super().__init__()
         self.height = height
         self.width = width
         self.size = width * height
@@ -59,11 +59,14 @@ class SOMGrid(torch.nn.Module):
             self.padding = (height, width)
 
         # layers to convert in and out of codebook
-        self.codebook_to_grid = einops.layers.Rearrange("b dim (h w) -> b dim h w", h = height, w = width)
-        self.grid_to_codebook = einops.layers.Rearrange("b dim h w -> b dim (h w)", h = height, w = width)
+        self.codebook_to_grid = Rearrange("b dim (h w) -> b dim h w", h = height, w = width)
+        self.grid_to_codebook = Rearrange("b dim h w -> b dim (h w)", h = height, w = width)
 
         if kernel_type == "gaussian":
-            kernel_size_max = max(self.kernel_size)
+            if isinstance(self.kernel_size, int):
+                kernel_size_max = self.kernel_size
+            else:
+                kernel_size_max = max(self.kernel_size)
             range_ = kernel_size_max // 2
             kernel_init = torch.exp(-torch.arange(-range_, range_ + 1)**2)
 
@@ -80,7 +83,7 @@ class SOMGrid(torch.nn.Module):
 
     def update_t(self):
         self.t += 1
-        t_scalar = 1 / (1 + self.t * self.time_constant)
+        t_scalar = torch.tensor(1 / (1 + self.t * self.time_constant))
         if self.kernel_type == "gaussian":
             self.kernel = (self.kernel_init).pow(torch.exp(t_scalar**2))
         else:
@@ -90,8 +93,11 @@ class SOMGrid(torch.nn.Module):
     def forward(self, cb_onehot, update_t = False):
         _, dim, _ = cb_onehot.shape
         cb_reshaped = self.codebook_to_grid(cb_onehot)
-        kernel = self.kernel[None, None, ...].repeat(dim, dim, 1, 1)
-        cb_blurred = torch.nn.functional.conv2d(cb_reshaped, kernel, padding = self.padding)
+        kernel = self.kernel[None, None, ...].repeat(dim, 1, 1, 1)
+        cb_blurred = torch.nn.functional.conv2d(cb_reshaped, 
+                                                kernel, 
+                                                padding = self.padding,
+                                                groups = dim)
         new_cb = self.grid_to_codebook(cb_blurred)
 
         if update_t:

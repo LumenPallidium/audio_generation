@@ -21,14 +21,16 @@ class BaseQuantizer(torch.nn.Module):
     codebook_size : int
         Number of entries in the codebook.
     """
-    def __init__(self, dim : int, 
+    def __init__(self, 
+                 dim : int, 
                  codebook_size : int,
                  cut_freq : int = 1,
                  alpha : float = 0.95,
                  replace_with_obs : bool = True,
                  init_scale = 1.0,
                  new_code_noise : float = 1e-5,
-                 use_som : bool = False,):
+                 use_som : bool = False,
+                 som_neighbor_distance : int = 6,):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
@@ -48,8 +50,8 @@ class BaseQuantizer(torch.nn.Module):
         if self.use_som:
             h, w = approximate_square_root(self.codebook_size)
             self.som = SOMGrid(h, w,
-                               neighbor_distance = 13,
-                               kernel_type = "gaussian")
+                               kernel_type = "gaussian",
+                               neighbor_distance = som_neighbor_distance,)
 
 
     def quantize(self, input):
@@ -96,7 +98,7 @@ class BaseQuantizer(torch.nn.Module):
             # take ema weighted sum of current code/symbol use frequencies
             self.cluster_frequency.data.mul_(self.alpha).add_(codebook_count, alpha = 1 - self.alpha)
 
-            # this vector leverages both the historical count and more recent counts
+            # when determining underused clusters, take into account history and recent use
             comparison_clusters = torch.maximum(self.cluster_frequency, codebook_count)
 
             # replace the codebook entries that have been used less than the cut frequency
@@ -113,6 +115,10 @@ class BaseQuantizer(torch.nn.Module):
                 else:
                     # get a sample from x_flat with size num_low_clusters
                     high_vectors = einops.rearrange(x_flat.detach().clone(), "b l d -> (b l) d")
+                    if high_vectors.shape[0] < num_low_clusters:
+                        # repeat and add some scaled noise
+                        high_vectors = high_vectors.repeat((num_low_clusters // high_vectors.shape[0]) + 1, 1)
+                        high_vectors += torch.randn_like(high_vectors) * self.new_code_noise
                     # shuffle them  - don't want to add position-based bias - and select num_low_clusters of them
                     high_vectors = high_vectors[torch.randperm(high_vectors.shape[0]), :][:num_low_clusters].T
 
@@ -148,6 +154,7 @@ class BaseQuantizer(torch.nn.Module):
         # get the high vectors, jitter them
         high_vectors += torch.randn_like(high_vectors) * self.new_code_noise
         return high_vectors
+        
 
     def forward(self, x, update_codebook : bool = False):
         """Quantize and dequantize the input. Returns the quantized input, the index of the codebook entry for each
@@ -182,21 +189,24 @@ class EMAQuantizer(BaseQuantizer):
     alpha : float
         The exponential moving average coefficient.
     """
-    def __init__(self, dim : int, 
+    def __init__(self, 
+                 dim : int, 
                  codebook_size : int, 
                  alpha : float = 0.99, 
                  eps : float = 1e-5,
                  cut_freq : int = 2,
                  replace_with_obs : bool = True,
                  init_scale : float = 1.0,
-                 use_som : bool = True):
+                 use_som : bool = True,
+                 som_neighbor_distance : int = 6,):
         super().__init__(dim, 
                          codebook_size, 
                          alpha = alpha, 
                          cut_freq = cut_freq, 
                          replace_with_obs = replace_with_obs,
                          init_scale = init_scale,
-                         use_som = use_som)
+                         use_som = use_som,
+                         som_neighbor_distance = som_neighbor_distance)
         
         self.eps = eps
 
@@ -272,7 +282,7 @@ class ResidualQuantizer(torch.nn.Module):
         # can limit to first n quantizers, they call this bitrate dropout in the paper
         # if n is None, use all quantizers, for training n will typically be sampled uniformly from [1, num_quantizers]
         if n is None:
-            n = self.num_quantizers + 1
+            n = self.num_quantizers
 
         x_hat = 0
         residual = x
@@ -336,7 +346,7 @@ if __name__ == "__main__":
         quantizer = BaseQuantizer(2, 10)
         optimizer = torch.optim.Adam(quantizer.parameters(), lr=1e-2)
     else:
-        quantizer = EMAQuantizer(2, 10)
+        quantizer = EMAQuantizer(2, 10, som_neighbor_distance = 1,)
 
     quantizer.to(device)
 
