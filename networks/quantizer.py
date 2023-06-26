@@ -28,7 +28,7 @@ class BaseQuantizer(torch.nn.Module):
                  alpha : float = 0.95,
                  replace_with_obs : bool = True,
                  init_scale = 1.0,
-                 new_code_noise : float = 1e-5,
+                 new_code_noise : float = 1e-9,
                  use_som : bool = False,
                  som_neighbor_distance : int = 6,):
         super().__init__()
@@ -39,6 +39,7 @@ class BaseQuantizer(torch.nn.Module):
         self.replace_with_obs = replace_with_obs
         self.new_code_noise : float = new_code_noise
         self.use_som = use_som
+        self.ema = False # flag for the occaisonal conditional update
 
         self.stale_clusters = None
 
@@ -93,40 +94,13 @@ class BaseQuantizer(torch.nn.Module):
                 codebook_onehot = self.som(codebook_onehot, update_t = update_codebook)
 
             # use that to get the count that each codebook entry has been used
-            codebook_count = torch.einsum("b l c -> c", codebook_onehot)
+            codebook_count = codebook_onehot.sum((0, 1))
 
             # take ema weighted sum of current code/symbol use frequencies
             self.cluster_frequency.data.mul_(self.alpha).add_(codebook_count, alpha = 1 - self.alpha)
 
-            # when determining underused clusters, take into account history and recent use
-            comparison_clusters = torch.maximum(self.cluster_frequency, codebook_count)
-
-            # replace the codebook entries that have been used less than the cut frequency
-            low_clusters = comparison_clusters < self.cut_freq
-            num_low_clusters = int(low_clusters.sum().item())
-            self.stale_clusters = num_low_clusters
-            # all clusters will be low clusters on the first run, so only update in between
-            if update_codebook and ((low_clusters.any()) and not (low_clusters.all())):
-                
-                if verbose:
-                    print(f"{num_low_clusters} clusters are poorly represented. Updating...")
-                if not self.replace_with_obs:
-                    high_vectors = self._replace_with_high(low_clusters, num_low_clusters)
-                else:
-                    # get a sample from x_flat with size num_low_clusters
-                    high_vectors = einops.rearrange(x_flat.detach().clone(), "b l d -> (b l) d")
-                    if high_vectors.shape[0] < num_low_clusters:
-                        # repeat and add some scaled noise
-                        high_vectors = high_vectors.repeat((num_low_clusters // high_vectors.shape[0]) + 1, 1)
-                        high_vectors += torch.randn_like(high_vectors) * self.new_code_noise
-                    # shuffle them  - don't want to add position-based bias - and select num_low_clusters of them
-                    high_vectors = high_vectors[torch.randperm(high_vectors.shape[0]), :][:num_low_clusters].T
-
-                # convert low clusters to indices
-                low_clusters = low_clusters.nonzero().squeeze(1)
-                    
-                # replace the low clusters with the new clusters
-                self.codebook[:, low_clusters] = high_vectors
+            # replace the underutilized codebook entries with new ones
+            self.replace_low(codebook_count, x_flat, verbose, update_codebook)
 
         return codebook_onehot
     
@@ -154,6 +128,42 @@ class BaseQuantizer(torch.nn.Module):
         # get the high vectors, jitter them
         high_vectors += torch.randn_like(high_vectors) * self.new_code_noise
         return high_vectors
+    
+    def replace_low(self, codebook_count, x_flat, verbose, update_codebook):
+        """Replaces underutilize codebook entries."""
+        # when determining underused clusters, take into account history and recent use
+        comparison_clusters = torch.maximum(self.cluster_frequency, codebook_count)
+
+        # replace the codebook entries that have been used less than the cut frequency
+        low_clusters = comparison_clusters < self.cut_freq
+        num_low_clusters = int(low_clusters.sum().item())
+        self.stale_clusters = num_low_clusters
+        # all clusters will be low clusters on the first run, so only update in between
+        if update_codebook and ((low_clusters.any()) and not (low_clusters.all())):
+            
+            if verbose:
+                print(f"{num_low_clusters} clusters are poorly represented. Updating...")
+            if not self.replace_with_obs:
+                high_vectors = self._replace_with_high(low_clusters, num_low_clusters)
+            else:
+                # get a sample from x_flat with size num_low_clusters
+                high_vectors = einops.rearrange(x_flat.detach().clone(), "b l d -> (b l) d")
+                if high_vectors.shape[0] < num_low_clusters:
+                    # repeat and add some scaled noise
+                    high_vectors = high_vectors.repeat((num_low_clusters // high_vectors.shape[0]) + 1, 1)
+                    high_vectors += torch.randn_like(high_vectors) * self.new_code_noise
+                # shuffle them  - don't want to add position-based bias - and select num_low_clusters of them
+                high_vectors = high_vectors[torch.randperm(high_vectors.shape[0]), :][:num_low_clusters].T
+
+            # convert low clusters to indices
+            low_clusters = low_clusters.nonzero().squeeze(1)
+                
+            # replace the low clusters with the new clusters
+            self.codebook[:, low_clusters] = high_vectors
+            if self.ema:
+                self.ema_codebook[:, low_clusters] = high_vectors
+                # update cluster frequency
+                self.cluster_frequency[low_clusters] += 1
         
 
     def forward(self, x, update_codebook : bool = False):
@@ -176,6 +186,17 @@ class BaseQuantizer(torch.nn.Module):
         x_quantized = x + (x_quantized - x).detach()
 
         return x_quantized, codebook_index, inner_loss
+    
+    def get_stale_clusters(self):
+        return self.stale_clusters
+    
+    def update_cutoff(self, new_cutoff : int = None, ratio : float = None):
+        if new_cutoff is not None:
+            self.cut_freq = new_cutoff
+        elif ratio is not None:
+            self.cut_freq = self.cut_freq * ratio
+        else:
+            raise ValueError("Must specify either new cutoff or ratio")
 
 class EMAQuantizer(BaseQuantizer):
     """Quantizer that uses an exponential moving average to update the codebook, 
@@ -192,7 +213,7 @@ class EMAQuantizer(BaseQuantizer):
     def __init__(self, 
                  dim : int, 
                  codebook_size : int, 
-                 alpha : float = 0.99, 
+                 alpha : float = 0.96, 
                  eps : float = 1e-5,
                  cut_freq : int = 2,
                  replace_with_obs : bool = True,
@@ -209,6 +230,7 @@ class EMAQuantizer(BaseQuantizer):
                          som_neighbor_distance = som_neighbor_distance)
         
         self.eps = eps
+        self.ema = True
 
         # disable grad for the codebook
         self.codebook.requires_grad = False
@@ -223,19 +245,20 @@ class EMAQuantizer(BaseQuantizer):
         The description can be found in Appendix A.1 here: https://arxiv.org/pdf/1711.00937.pdf"""
 
         # projects the input onto the closest codebook entry, taking a mean along the batch and length
-        size = x_flat.shape[0] * x_flat.shape[1]
-        codebook_sum = torch.einsum("b l d, b l c -> d c", x_flat, codebook_onehot) / size
+        with torch.no_grad():
+            size = x_flat.shape[0] * x_flat.shape[1]
+            codebook_sum = torch.einsum("b l d, b l c -> d c", x_flat, codebook_onehot)
 
-        # update ema codebook with the input vectors
-        self.ema_codebook.data.mul_(self.alpha).add_(codebook_sum, alpha = 1 - self.alpha)
+            # update ema codebook with the input vectors
+            self.ema_codebook.data.mul_(self.alpha).add_(codebook_sum, alpha = 1 - self.alpha)
 
-        # normalize the codebook
-        n = self.cluster_frequency.sum()
-        cluster_frequency_normalized = ((self.cluster_frequency + self.eps) / (n + self.eps) * n)
-        codebook_normalized = self.ema_codebook / cluster_frequency_normalized.unsqueeze(0)
+            # normalize the codebook
+            n = self.cluster_frequency.sum()
+            cluster_frequency_normalized = ((self.cluster_frequency + self.eps) / (n + self.codebook_size * self.eps) * n)
+            codebook_normalized = self.ema_codebook / cluster_frequency_normalized.unsqueeze(0)
 
-        # overwrite codebook
-        self.codebook.data.copy_(codebook_normalized)
+            # overwrite codebook
+            self.codebook.data.copy_(codebook_normalized)
     
 
 class ResidualQuantizer(torch.nn.Module):
@@ -251,7 +274,8 @@ class ResidualQuantizer(torch.nn.Module):
                  quantizer_class = "ema",
                  scale_factor = 4.0,
                  priority_n = 24,
-                 vq_cutoff_freq = 1):
+                 vq_cutoff_freq = 1,
+                 use_som = True,):
         
         super().__init__()
 
@@ -259,6 +283,7 @@ class ResidualQuantizer(torch.nn.Module):
         self.dim = dim
         self.codebook_sizes = tuple_checker(codebook_sizes, num_quantizers)
         self.priority_n = priority_n
+        self.use_som = use_som
 
         # residual gets smaller at each step, so can be helpful to have small quantizer vectors
         scale_factors = [1 / (scale_factor ** i) for i in range(num_quantizers)]
@@ -269,7 +294,8 @@ class ResidualQuantizer(torch.nn.Module):
         quantizers = [quantizer_type(self.dim, 
                                      codebook_size, 
                                      init_scale = scale,
-                                     cut_freq = vq_cutoff_freq) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
+                                     cut_freq = vq_cutoff_freq,
+                                     use_som = use_som) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
 
         self.quantizers = torch.nn.ModuleList(quantizers)
 
@@ -333,30 +359,149 @@ class ResidualQuantizer(torch.nn.Module):
 
 
 if __name__ == "__main__":
-    # test the quantizer
+    # long test on CIFAR (based on the test in my energy_transformer repo)
     from tqdm import tqdm
+    import os
+    import torchvision
+    from itertools import chain
+    from einops import rearrange
+    from einops.layers.torch import Rearrange
+    import matplotlib.pyplot as plt
 
+    # helpful functions
+    im2tensor = torchvision.transforms.ToTensor()
+
+    def collate(x, im2tensor = im2tensor):
+        x = [im2tensor(x_i[0]) for x_i in x]
+        return torch.stack(x, dim = 0)
+
+    def tensor2im(x):
+        return torchvision.transforms.ToPILImage()(x)
+
+    def save_im(x, path):
+        tensor2im(x).save(path)
+
+    def plot_som_codebook(path, quantizer, deembedder, patch_size = 4):
+        """Plot the codebook as a SOM."""
+        with torch.no_grad():
+            if not isinstance(quantizer, ResidualQuantizer):
+                quantizers = [quantizer]
+            else:
+                quantizers = quantizer.quantizers
+            for i, quantizer in enumerate(quantizers):
+                codebook = quantizer.codebook #dim, codebook_size
+                codebook = quantizer.som.codebook_to_grid(codebook) #dim, h, w
+
+                codebook = codebook.permute(1, 2, 0) #h, w, dim
+
+                codebook = deembedder(codebook) #h, w, dim'
+
+                codebook = rearrange(codebook, "h w (p1 p2 c) -> c (h p1) (w p2)", p1 = patch_size, p2 = patch_size) #c, h, w
+                save_im(codebook, path + f"_{i}" + ".png")
+
+    # making a tmp folder to store the images
+    os.makedirs("tmp/", exist_ok = True)
+
+    # data root
+    data_root = "D:/Projects/" # you should only need to change this
+
+    # data and patcher params
+    h, w = 32, 32
+    patch_size = 4
+    patch_dim = patch_size**2 * 3
+    embed_dim = 64
+    n_patches = (h // patch_size) * (w // patch_size)
+    batch_size = 32
     test_base = False
-    test_iterations = 3000
+    residual = True
+    residual_count = 4
+    codebook_size = 1024
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # training params
+    n_epochs = 10
+    lr = 1e-3
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    cifar = torchvision.datasets.CIFAR100(root = data_root, train = True, download = True)
+
+    
+        # these break a batch of images into patches and the converse, respectively
+    patcher = Rearrange("... c (h p1) (w p2) -> ... (h w) (p1 p2 c)", p1 = patch_size, p2 = patch_size).to(device)
+
+    depatcher = Rearrange("... (h w) (p1 p2 c) -> ... c (h p1) (w p2)", p1 = patch_size, p2 = patch_size, h = h // patch_size, w = w // patch_size).to(device)
+
+    # feedforward layers to convert the last dim of the patched images to an embedding dimension
+    patch_embedder = torch.nn.Sequential(
+        torch.nn.Linear(patch_dim, embed_dim),
+        torch.nn.LayerNorm(embed_dim),
+        torch.nn.ReLU(),
+        torch.nn.Linear(embed_dim, embed_dim)).to(device)
+    patch_deembedder = torch.nn.Sequential(
+        torch.nn.Linear(embed_dim, embed_dim),
+        torch.nn.LayerNorm(embed_dim),
+        torch.nn.ReLU(),
+        torch.nn.Linear(embed_dim, patch_dim)).to(device)
+
 
     # test the quantizers
     if test_base:
-        quantizer = BaseQuantizer(2, 10)
-        optimizer = torch.optim.Adam(quantizer.parameters(), lr=1e-2)
+        if residual:
+            quantizer = ResidualQuantizer(residual_count, embed_dim, codebook_size, quantizer_class = "base")
+        else:
+            quantizer = BaseQuantizer(embed_dim, codebook_size)
+        chainz = chain(quantizer.parameters(),
+                       patch_embedder.parameters(),
+                       patch_deembedder.parameters())
     else:
-        quantizer = EMAQuantizer(2, 10, som_neighbor_distance = 1,)
-
+        if residual:
+            quantizer = ResidualQuantizer(residual_count, embed_dim, codebook_size, quantizer_class = "ema")
+        else:
+            quantizer = EMAQuantizer(embed_dim, codebook_size, use_som = True, som_neighbor_distance = 7,)
+        chainz = chain(patch_embedder.parameters(),
+                       patch_deembedder.parameters())
+        
     quantizer.to(device)
 
-    for iter in tqdm(range(test_iterations)):
-        x = torch.randn((1, 3, 2)).to(device)
+    optimizer = torch.optim.Adam(chainz, 
+                                lr = lr)
 
-        x_quantized, index, inner_loss = quantizer(x, update_codebook = True)
+    criterion = torch.nn.MSELoss()
 
-        if test_base:
-            # optimize the base quantizer
+    losses = []
+
+    for epoch in range(n_epochs):
+        print(f"Epoch {epoch}")
+        dataloader = torch.utils.data.DataLoader(cifar, 
+                                            batch_size = batch_size, 
+                                            shuffle = True,
+                                            collate_fn = collate)
+        for i, x in enumerate(tqdm(dataloader)):
             optimizer.zero_grad()
-            inner_loss.backward()
+            x = x.to(device)
+            x_orig = x.clone()
+
+            x = patcher(x)
+            x = patch_embedder(x)
+
+            x, codebook_index, inner_loss = quantizer(x, update_codebook = True)
+            x = patch_deembedder(x)
+
+            x = depatcher(x)
+
+            # only compute loss on the masked sections
+            loss = criterion(x, x_orig) + inner_loss
+            loss.backward()
             optimizer.step()
+
+            losses.append(loss.item())
+            
+            if i % 100 == 0:
+                print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
+                save_im(x_orig[0], f"tmp/epoch_{epoch}_{i}_orig.png")
+                save_im(x[0], f"tmp/epoch_{epoch}_{i}_recon.png")
+                if quantizer.use_som:
+                    plot_som_codebook(f"tmp/epoch_{epoch}_{i}_codebook", quantizer, patch_deembedder, patch_size = patch_size)
+        quantizer.update_cutoff(ratio = 2/3)
+        #print(f"Stale codebook entries: {quantizer.stale_clusters}")
+#TODO : why are EMA stale clusters not being updated?

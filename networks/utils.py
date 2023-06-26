@@ -4,6 +4,7 @@ import os
 import numpy as np
 import torchaudio
 from sympy.ntheory import factorint
+from datasets import COMMONVOICE
 
 #TODO: add a function for weight and spectral normalization here
 
@@ -158,9 +159,8 @@ def get_dataset(name, path):
         sample_rate = 16000
     elif name == "commonvoice":
         # "C:/Projects/common_voice/"
-        dataset = torchaudio.datasets.COMMONVOICE(path)
-        # update to wavs
-        dataset._ext_audio = ".wav"
+        dataset = COMMONVOICE(path)
+
         sample_rate = 48000
 
     else:

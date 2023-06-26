@@ -170,6 +170,7 @@ class CausalVQAE(torch.nn.Module):
                  use_energy_transformer = False,
                  n_heads = 8,
                  context_length = 225, # 72000 / 320, input length divided by downsample factor
+                 use_som = True
                  ):
         
         super().__init__()
@@ -197,7 +198,8 @@ class CausalVQAE(torch.nn.Module):
                                             dim = codebook_dim, 
                                             quantizer_class = vq_type, 
                                             codebook_sizes = codebook_size,
-                                            vq_cutoff_freq = vq_cutoff_freq)
+                                            vq_cutoff_freq = vq_cutoff_freq,
+                                            use_som = use_som)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 

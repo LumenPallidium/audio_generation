@@ -39,12 +39,14 @@ class SOMGrid(torch.nn.Module):
                  height,
                  width,
                  neighbor_distance = 1,
-                 kernel_type = "gaussian",
-                 time_constant = 0.1):
+                 kernel_type = "hard",
+                 time_constant = 0.0001,
+                 normalize = False,):
         super().__init__()
         self.height = height
         self.width = width
         self.size = width * height
+        self.normalize = normalize
 
         self.t = 0
         self.time_constant = time_constant
@@ -59,8 +61,8 @@ class SOMGrid(torch.nn.Module):
             self.padding = (height, width)
 
         # layers to convert in and out of codebook
-        self.codebook_to_grid = Rearrange("b dim (h w) -> b dim h w", h = height, w = width)
-        self.grid_to_codebook = Rearrange("b dim h w -> b dim (h w)", h = height, w = width)
+        self.codebook_to_grid = Rearrange("... dim (h w) -> ... dim h w", h = height, w = width)
+        self.grid_to_codebook = Rearrange("... dim h w -> ... dim (h w)", h = height, w = width)
 
         if kernel_type == "gaussian":
             if isinstance(self.kernel_size, int):
@@ -78,19 +80,27 @@ class SOMGrid(torch.nn.Module):
         else:
             raise ValueError("kernel_type must be gaussian or hard")
         
+        if self.normalize:
+            kernel_init = kernel_init / kernel_init.sum()
+        
         self.register_buffer("kernel_init", kernel_init)
         self.register_buffer("kernel", kernel_init)
 
     def update_t(self):
         self.t += 1
-        t_scalar = torch.tensor(1 / (1 + self.t * self.time_constant))
+        t_scalar = torch.tensor(1 + self.t * self.time_constant)
         if self.kernel_type == "gaussian":
-            self.kernel = (self.kernel_init).pow(torch.exp(t_scalar**2))
+            kernel = (self.kernel_init).pow(t_scalar)
         else:
-            self.kernel = self.kernel_init * t_scalar
+            kernel = self.kernel_init * (1 / t_scalar)
+        
+        if self.normalize:
+            kernel = kernel / kernel.sum()
+
+        self.kernel = kernel
 
 
-    def forward(self, cb_onehot, update_t = False):
+    def forward(self, cb_onehot, update_t = True):
         _, dim, _ = cb_onehot.shape
         cb_reshaped = self.codebook_to_grid(cb_onehot)
         kernel = self.kernel[None, None, ...].repeat(dim, 1, 1, 1)
