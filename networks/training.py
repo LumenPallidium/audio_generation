@@ -2,6 +2,7 @@ import torch
 import torchaudio
 import numpy as np
 import os
+import pickle
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from IPython.display import Audio
@@ -32,6 +33,16 @@ class WarmUpScheduler(object):
         else:
             self.scheduler.step()
         self.iter += 1
+
+    def save_state_dict(self):
+        return {"scheduler": self.scheduler.state_dict(),
+                "iter": self.iter,
+                "warmup_iter": self.warmup_iter,
+                }
+    def load_state_dict(self, dictionary):
+        self.scheduler.load_state_dict(dictionary["scheduler"])
+        self.iter = dictionary["iter"]
+        self.warmup_iter = dictionary["warmup_iter"]
 
 def multispectral_reconstruction_loss(original, 
                                    reconstruction,
@@ -100,8 +111,9 @@ class Trainer():
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
-                 noise_aug_scale = 0.1,
+                 noise_aug_scale = 0.01,
                  cutoff_scale_per_epoch = 0.95,
+                 accumulation_steps = 8
                  ):
         
         self.device = device
@@ -124,6 +136,7 @@ class Trainer():
 
         self.save_every = save_every
         self.batch_size = batch_size
+        self.accumulation_steps = accumulation_steps
         self.codebook_update_step = codebook_update_step
         self.sample_rate = sample_rate
         self.use_one_discriminator = use_one_discriminator
@@ -148,9 +161,13 @@ class Trainer():
         
         # load discriminators
         self.discriminators, self.codebook_options = self._init_discriminators(discriminators, discriminator_paths, discriminator_lr)
-
         self.epoch = 0
         self.mini_epoch_i = 0
+
+        if os.path.exists(self.save_path + "trainer_state.pkl"):
+            self.load_state()
+
+            
 
     def _init_discriminators(self, discriminators, discriminator_paths, discriminator_lr):
         # these help tie codebook dropout/bitrate to the discriminators
@@ -196,6 +213,28 @@ class Trainer():
             os.makedirs(image_path)
         return path, image_path
     
+    def save_state(self):
+        state = {"epoch" : self.epoch,
+                 "mini_epoch_i" : self.mini_epoch_i,
+                 "loss_breakdown" : self.loss_breakdown,
+                 "model_state_dict" : self.model.state_dict(),
+                 "optimizers" : [optimizer.state_dict() for optimizer in self.optimizers],
+                 "scheduler" : self.scheduler.save_state_dict() if self.scheduler is not None else None}
+        torch.save(state, self.save_path + "trainer_state.pkl")
+        print(f"\tSaved state to {self.save_path + 'trainer_state.pkl'}")
+
+    def load_state(self):
+        state = torch.load(self.save_path + "trainer_state.pkl")
+        self.epoch = state["epoch"]
+        self.mini_epoch_i = state["mini_epoch_i"]
+        self.loss_breakdown = state["loss_breakdown"]
+        self.model.load_state_dict(state["model_state_dict"])
+        for optimizer, state_dict in zip(self.optimizers, state["optimizers"]):
+            optimizer.load_state_dict(state_dict)
+        if self.scheduler is not None:
+            self.scheduler.load_state_dict(state["scheduler"])
+        print(f"\tLoaded trainer state from {self.save_path + 'trainer_state.pkl'}")
+    
     def update_loss_breakdown(self, loss, loss_name, type = "generator"):
         if loss_name not in self.loss_breakdown[type]:
             self.loss_breakdown[type][loss_name] = loss.item()
@@ -213,7 +252,6 @@ class Trainer():
     def mini_epoch(self,
                     data_loader_iter,
                     losses = None,
-                    accumulation_steps = 8,
                     prioritize_early = False,
                     gan_loss = True,
                     multispectral = True,
@@ -223,6 +261,7 @@ class Trainer():
                     use_commit_loss = True,
                     discriminator_energies = None,):
         """Executes a mini-epoch. Can be as part of a GAN etc."""
+        accumulation_steps = self.accumulation_steps
         optimizer = self.optimizers[0]
         if gan_loss:
             if self.use_one_discriminator:
@@ -400,11 +439,13 @@ class Trainer():
                 utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
 
             if epoch % self.save_every == 0:
+                
                 torch.save(self.model.state_dict(), self.save_path + f"model_epoch_{self.epoch}.pt")
                 if gan_loss:
                     for discriminator_i in self.discriminators:
                         torch.save(discriminator_i.state_dict(), self.save_path + f"{discriminator_i.name}_{self.epoch}.pt")
-                    
+                        
+                trainer.save_state()
             if losses is not None:
                 losses = losses + epoch_losses
 

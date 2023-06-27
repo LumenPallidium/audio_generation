@@ -497,11 +497,9 @@ if __name__ == "__main__":
             losses.append(loss.item())
             
             if i % 100 == 0:
-                print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
                 save_im(x_orig[0], f"tmp/epoch_{epoch}_{i}_orig.png")
                 save_im(x[0], f"tmp/epoch_{epoch}_{i}_recon.png")
                 if quantizer.use_som:
                     plot_som_codebook(f"tmp/epoch_{epoch}_{i}_codebook", quantizer, patch_deembedder, patch_size = patch_size)
         quantizer.update_cutoff(ratio = 2/3)
-        #print(f"Stale codebook entries: {quantizer.stale_clusters}")
-#TODO : why are EMA stale clusters not being updated?
+        print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
