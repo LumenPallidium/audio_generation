@@ -9,7 +9,7 @@ If you are interested in a general implementation of Soundstream or a neural aud
 
 * I've implemented [multiresolution convolutions](https://arxiv.org/abs/2305.01638), see the networks/wavelets.py file (which also includes an attempt at a wavelet-based upscaler). While they are implemented, these are not currently integrated into the main VQ-VAE model
 * I've added [modern self-organizing maps](https://arxiv.org/abs/2302.07950) to the codebooks, see networks/som_utils.py. I also include a test on CIFAR which makes pretty pictures. 
-![SOM codebook](images/som.png)
+<img style="float: right;" src="images/som.png">
 I hope that SOMs will serve to make attention mechanisms on the codebook more robust (since the codebook has a natural notion of neighborhood and proximity among entries)
 * I explored the use of energy transformers for this task. This was initially included in this repository, but now is its own [seperate repository](https://github.com/LumenPallidium/energy_transformer), from where it can be pip installed (see instructions there).
 
