@@ -67,6 +67,7 @@ class CausalConvT1d(torch.nn.Module):
         pad = x.shape[-1] - self.right_pad
         return x[..., :pad]
     
+    
 class CausalResidualBlock1d(torch.nn.Module):
     """A residual block with causal convolutions. Standard convolution followed by kernel = 1 convolution."""
     def __init__(self, 
@@ -159,7 +160,7 @@ class CausalVQAE(torch.nn.Module):
                  codebook_size = 1024,
                  codebook_dim = 512,
                  vq_cutoff_freq = 1,
-                 vq_type = "base",
+                 vq_type = "ema",
                  strides = (2, 4, 5, 8),
                  input_format = "b l c",
                  channel_multiplier = 2,
@@ -169,6 +170,7 @@ class CausalVQAE(torch.nn.Module):
                  use_energy_transformer = False,
                  n_heads = 8,
                  context_length = 225, # 72000 / 320, input length divided by downsample factor
+                 use_som = True
                  ):
         
         super().__init__()
@@ -184,7 +186,8 @@ class CausalVQAE(torch.nn.Module):
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
         self.strides = tuple_checker(strides, n_blocks)
 
-        if ET_AVAILABLE and self.use_energy_transformer:
+        if self.use_energy_transformer:
+            assert ET_AVAILABLE, "Energy Transformer not available. Please install it by following readme instructions."
             self.quantizer = EnergyTransformer(codebook_dim,
                                                codebook_dim,
                                                n_heads = n_heads,
@@ -195,7 +198,8 @@ class CausalVQAE(torch.nn.Module):
                                             dim = codebook_dim, 
                                             quantizer_class = vq_type, 
                                             codebook_sizes = codebook_size,
-                                            vq_cutoff_freq = vq_cutoff_freq)
+                                            vq_cutoff_freq = vq_cutoff_freq,
+                                            use_som = use_som)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 
@@ -235,7 +239,7 @@ class CausalVQAE(torch.nn.Module):
         self.encoders = torch.nn.ModuleList(encoders)
         self.decoders = torch.nn.ModuleList(decoders)
 
-    def forward(self, x, update_codebook = False, codebook_n = None, multiscale = False, prioritize_early = False):
+    def forward(self, x, update_codebook = False, codebook_n = None, prioritize_early = False):
         if self.zero_center:
             mean = x.mean(dim = -1, keepdim = True).detach()
             x = x - mean
@@ -254,20 +258,16 @@ class CausalVQAE(torch.nn.Module):
         x_quantized = einops.rearrange(x_quantized,
                                         "b l c -> b c l" )
 
-        multiscales = []
         for decoder in self.decoders:
             # each decoder takes the quantized from the previous decoder
             x_quantized = decoder(x_quantized)
-            # multiscale forces the average (over channels) to be close to the original
-            if multiscale:
-                multiscales.append(x_quantized.mean(dim = 1, keepdim = True))
 
         x_quantized = self.rearrange_out(x_quantized)
 
         if self.zero_center:
             x_quantized = x_quantized + mean
  
-        return x_quantized, commit_loss, index, multiscales
+        return x_quantized, commit_loss, index
     
     def sample(self, length = 225, device = "cuda", normal_var = 5e3, n_iters = 12):
         self.to(device)
@@ -279,7 +279,7 @@ class CausalVQAE(torch.nn.Module):
             else:
                 x = 0
                 for i in range(self.num_quantizers):
-                    x_i= torch.randint(0, self.codebook_size,
+                    x_i= torch.randint(0, self.codebook_size[0],
                                         (1, length)).to(device)
                     x_i = self.quantizer.quantizers[i].dequantize(x_i)
                     x += x_i
@@ -314,20 +314,37 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from IPython.display import Audio
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    #model = CausalVQAE(in_channels = 1, input_format = "n c l").to(device)
+    test_sampling = False
 
-    #x = torch.randn(8, 1, 72000).to(device)
-    #y, commit_loss, index, multiscales = model(x, codebook_n = model.quantizer.num_quantizers)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CausalVQAE(in_channels = 1, 
-                    num_quantizers = 8, 
-                    codebook_size = 1024, 
-                    input_format = "n c l",
-                    use_energy_transformer = True,)
+                       num_quantizers = 8, 
+                       codebook_size = 1024, 
+                       input_format = "n c l",
+                       use_energy_transformer = False,)
     
-    y = model.sample()
-    Audio(y[0].detach().cpu().numpy(), rate = 16000)
+    if test_sampling:
+        y = model.sample(device = device)
+        Audio(y[0].detach().cpu().numpy(), rate = 16000)
+    else:
+        test_iterations = 100
+        om = torchaudio.load(r"om.wav")[0]
+        om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
+
+        # shape needs to be divisible by 320 for current architecture
+        om = om[:, :, :65280]
+
+        optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
+
+        for i in tqdm(range(test_iterations)):
+            optimizer.zero_grad()
+            y, commit_loss, index = model(om, update_codebook = True)
+
+            loss = torch.mean((y - om).pow(2)) + commit_loss
+
+            loss.backward()
+            optimizer.step()
 
 
 
