@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 import torchaudio
+from einops import rearrange
+from warnings import warn
 from sympy.ntheory import factorint
 from datasets import COMMONVOICE
 
@@ -167,3 +169,58 @@ def get_dataset(name, path):
         raise ValueError(f"Dataset {name} not recognised")
     
     return dataset, sample_rate
+
+def sound_to_codebooks(sound, model):
+    if not model.quantizer.use_som:
+        warn("This is not a SOM model, that is okay but the codebooks have no intrinsic topology.")
+        h, w = approximate_square_root(model.codebook_size[0])
+    else:
+        # i was too verbose with my class stuff
+        h = model.quantizer.quantizers[0].som.height
+        w = model.quantizer.quantizers[0].som.width
+    _, _, indices = model.encode(sound)
+    # indices has shape batch, length, num_quantizers
+    if len(indices.shape) == 3:
+        # get just the first batch
+        indices = indices[0]
+    indices = torch.nn.functional.one_hot(indices, num_classes = model.codebook_size[0])
+    # break into hw but join codebooks on width
+    indices = rearrange(indices, "l nq (h w) -> l h w nq", h = h, w = w)
+    indices = indices.sum(dim = -1)
+    return indices
+
+def animate_sound(sound, model, rate = 16000, slowdown = 2):
+    from matplotlib import animation
+    codebooks = sound_to_codebooks(sound, model).cpu().numpy()
+
+    time_len = sound.shape[-1] * slowdown / rate
+    time_per_frame = time_len / codebooks.shape[0]
+
+    fig, ax = plt.subplots()
+    cax = ax.pcolormesh(codebooks[0], cmap="Blues")
+
+    def animate(i):
+        cax.set_array(codebooks[i])
+
+    anim = animation.FuncAnimation(fig, animate, interval = 1000 * time_per_frame, frames = codebooks.shape[0])
+    anim.save("test.mp4")
+
+    sound_recons, _, _ = model(sound)
+
+    torchaudio.save("test.wav", sound_recons.squeeze(0), rate // slowdown)
+
+    # reload video and add audio to it - not sure of a better way using matplotlib
+    import ffmpeg
+    video = ffmpeg.input("test.mp4")
+    audio = ffmpeg.input("test.wav")
+
+    ffmpeg.output(video, audio, "output.mp4").run()
+
+    # delete the intermediate files
+    os.remove("test.mp4")
+    os.remove("test.wav")
+
+
+
+
+    

@@ -90,25 +90,42 @@ def causal_functional_conv_t1d(x, weight, bias = None, stride = 1, dilation = 1)
     return x[..., :pad]
     
 class CausalMultiresConv1d(torch.nn.Module):
+    """Multi-resolution convolutions from here:
+    https://arxiv.org/abs/2305.01638
+    Updated to use causal convolutions.
+
+    Parameters
+    ----------
+    channels : int
+        Number of output channels.
+    kernel_size : int
+        Size of the kernel.
+    depth : int
+        Number of layers.
+    dropout : float
+        Dropout rate.
+    activation : torch.nn.Module
+        Activation function.
+    """
     def __init__(self,
-                 out_channels,
+                 channels,
                  kernel_size,
                  depth,
                  dropout = 0.0,
                  activation = torch.nn.GELU()):
         super().__init__()
-        self.out_channels = out_channels
+        self.channels = channels
         self.kernel_size = kernel_size
         self.depth = depth
         self.dropout = dropout
         self.activation = activation
 
-        scalar = sqrt(2.0 / (kernel_size * 2))
+        scalar = sqrt(2.0) / (kernel_size * 2)
 
         # weights as described in paper
-        self.h0 = torch.nn.Parameter(torch.empty(out_channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
-        self.h1 = torch.nn.Parameter(torch.empty(out_channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
-        w = torch.empty(out_channels, depth + 2).uniform_(-1., 1.) * sqrt(2.0 / (2 * depth + 4))
+        self.h0 = torch.nn.Parameter(torch.empty(channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
+        self.h1 = torch.nn.Parameter(torch.empty(channels, 1, kernel_size).uniform_(-1., 1.) * scalar)
+        w = torch.empty(channels, depth + 2).uniform_(-1., 1.) * sqrt(2.0 / (2 * depth + 4))
         self.w = torch.nn.Parameter(w)
 
         self.dropout_layer = torch.nn.Dropout(dropout)
@@ -131,45 +148,73 @@ class CausalMultiresConv1d(torch.nn.Module):
         y += self.w[:, :1] * residual_low
         y += x * self.w[:, -1:]
         return self.dropout_layer(self.activation(y))
+    
+class MultiresScaleBlock(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 scale_factor = 2,
+                 kernel_size = 3,
+                 multires_depth = 6,
+                 dropout = 0.0,
+                 activation = torch.nn.GELU()):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.scale_factor = scale_factor
+        self.kernel_size = kernel_size
+        self.activation = activation
+
+        self.multires_conv = CausalMultiresConv1d(in_channels, kernel_size, multires_depth, dropout, activation)
+        self.conv = torch.nn.Conv1d(in_channels, out_channels, 1)
+
+    def forward(self, x):
+        x = self.multires_conv(x)
+        x = torch.nn.functional.interpolate(x, scale_factor = self.scale_factor)
+        x = self.conv(x)
+        return self.activation(x)
 
 if __name__ == "__main__":
+    # testing on what is effectively fourier decomposition
     from tqdm import tqdm
     import torchaudio
-    test_iterations = 100
+    from utils import losses_to_running_loss
+    test_iterations = 500
+    num_freqs = 6
+    interval = torch.arange(-1, 1, 0.01)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    test_wavelet = False
 
-    om = torchaudio.load(r"om.wav")[0]
-    om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
-
-    if test_wavelet:
-        model= WaveletLayer(1, 2).to(device)
-    else:
-        model = torch.nn.Sequential(torch.nn.Conv1d(1, 32, 1, padding = "same"),
-                                    CausalMultiresConv1d(32, 21, 4),
-                                    torch.nn.Upsample(scale_factor = 2),
-                                    torch.nn.Conv1d(32, 1, 1, padding = "same")).to(device)
+    model = torch.nn.Sequential(torch.nn.Conv1d(1, num_freqs, 1, padding = "same"),
+                                torch.nn.GELU(),
+                                CausalMultiresConv1d(num_freqs, 21, 6),
+                                ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
 
-    om = torch.nn.functional.interpolate(om, size = 224)
-    x_ds = torch.nn.functional.interpolate(om, scale_factor = 0.5)
-
     fig, ax = plt.subplots()
-    x_hats = []
     losses = []
+
     for i in tqdm(range(test_iterations)):
-        noise = 0#torch.randn_like(x_ds) * 0.1
-        x_i = x_ds + noise
+        optimizer.zero_grad()
+        # randomly sample frequencies
+        freqs = torch.rand(num_freqs) * 4
+        freqs = torch.sort(freqs)[0]
+        sins = torch.sin(2 * torch.pi * freqs.unsqueeze(-1) * interval.unsqueeze(0))
+        sins = sins.sum(dim = 0, keepdim = True).unsqueeze(0)
 
-        x_hat = model(x_i)
+        x_hat = model(sins).sum(dim = (0, -1))
 
-        loss = torch.nn.functional.mse_loss(x_hat, om)
+        loss = torch.nn.functional.mse_loss(x_hat, freqs)
         loss.backward()
         optimizer.step()
 
         losses.append(loss.item())
 
-    plt.plot(losses)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = param_group['lr'] * 0.99
+
+
+    log_losses = np.log(losses)
+    plt.plot(losses_to_running_loss(log_losses))
     
 
 
