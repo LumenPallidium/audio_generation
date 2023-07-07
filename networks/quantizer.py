@@ -388,6 +388,7 @@ if __name__ == "__main__":
                 quantizers = [quantizer]
             else:
                 quantizers = quantizer.quantizers
+            codebooks = []
             for i, quantizer in enumerate(quantizers):
                 codebook = quantizer.codebook #dim, codebook_size
                 codebook = quantizer.som.codebook_to_grid(codebook) #dim, h, w
@@ -397,7 +398,10 @@ if __name__ == "__main__":
                 codebook = deembedder(codebook) #h, w, dim'
 
                 codebook = rearrange(codebook, "h w (p1 p2 c) -> c (h p1) (w p2)", p1 = patch_size, p2 = patch_size) #c, h, w
-                save_im(codebook, path + f"_{i}" + ".png")
+                codebooks.append(codebook)
+            codebooks = torch.stack(codebooks, dim = 0)
+            codebooks = torchvision.utils.make_grid(codebooks, nrow = i + 1, padding = 2, pad_value = 1)
+            save_im(codebooks, path + ".png")
 
     # making a tmp folder to store the images
     os.makedirs("tmp/", exist_ok = True)
@@ -409,13 +413,13 @@ if __name__ == "__main__":
     h, w = 32, 32
     patch_size = 4
     patch_dim = patch_size**2 * 3
-    embed_dim = 64
+    embed_dim = patch_dim // 5 # 5x compression 
     n_patches = (h // patch_size) * (w // patch_size)
     batch_size = 32
     test_base = False
     residual = True
-    residual_count = 4
-    codebook_size = 1024
+    residual_count = 6
+    codebook_size = 128
 
     # training params
     n_epochs = 10
@@ -481,6 +485,9 @@ if __name__ == "__main__":
             x = x.to(device)
             x_orig = x.clone()
 
+            if i == 0:
+                x_copy = x.clone().detach()
+
             x = patcher(x)
             x = patch_embedder(x)
 
@@ -497,9 +504,26 @@ if __name__ == "__main__":
             losses.append(loss.item())
             
             if i % 100 == 0:
-                save_im(x_orig[0], f"tmp/epoch_{epoch}_{i}_orig.png")
-                save_im(x[0], f"tmp/epoch_{epoch}_{i}_recon.png")
+                str_i = str(i).zfill(5)
+                b, c, h, w = x.shape
+
+                with torch.no_grad():
+                    x = patcher(x_copy)
+                    x = patch_embedder(x)
+
+                    x, codebook_index, inner_loss = quantizer(x, update_codebook = True)
+                    x = patch_deembedder(x)
+
+                    x = depatcher(x)
+
+
+                x_out = torch.stack([x_copy, x], dim = 0)
+                x_out = rearrange(x_out, "n b c h w -> (b n) c h w")
+
+                x_out = torchvision.utils.make_grid(x_out, nrow = 8, padding = 2, pad_value = 1)
+                save_im(x_out, f"tmp/epoch_{epoch}_{str_i}.png")
                 if quantizer.use_som:
-                    plot_som_codebook(f"tmp/epoch_{epoch}_{i}_codebook", quantizer, patch_deembedder, patch_size = patch_size)
+                    plot_som_codebook(f"tmp/codebook_epoch_{epoch}_{str_i}", quantizer, patch_deembedder, patch_size = patch_size)
         quantizer.update_cutoff(ratio = 2/3)
         print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
+    plt.plot(losses)
