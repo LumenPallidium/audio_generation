@@ -1,9 +1,11 @@
 import torch
 import torchaudio
 import einops
+import numpy as np
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
-from utils import add_util_norm
+from wavelets import MultiresScaleBlock
+from utils import add_util_norm, animate_sound
 try:
     from energy_transformer import EnergyTransformer
     ET_AVAILABLE = True
@@ -90,7 +92,6 @@ class CausalResidualBlock1d(torch.nn.Module):
         self.activation = activation
         self.dropout = torch.nn.Dropout(dropout)
 
-    
     def forward(self, x):
         x_p = self.activation(self.conv1(x))
         x_p = self.conv2(x_p)
@@ -133,16 +134,15 @@ class CausalDecoderBlock(torch.nn.Module):
                  depthwise = False):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
-        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride=stride),
+        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
                                            activation)
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
-                                                            dilation=dilation,
+                                                            dilation = dilation,
                                                             depthwise = depthwise),
                                       activation) for dilation in dilations]
         
         self.layers = torch.nn.ModuleList(layers)
-
 
     def forward(self, x):
         x = self.in_conv(x)
@@ -170,7 +170,8 @@ class CausalVQAE(torch.nn.Module):
                  use_energy_transformer = False,
                  n_heads = 8,
                  context_length = 225, # 72000 / 320, input length divided by downsample factor
-                 use_som = True
+                 use_som = True,
+                 multires_skip_conn = True,
                  ):
         
         super().__init__()
@@ -181,10 +182,12 @@ class CausalVQAE(torch.nn.Module):
         self.vq_cutoff_freq = vq_cutoff_freq
         self.zero_center = zero_center
         self.use_energy_transformer = use_energy_transformer
+        self.multires_skip_conn = multires_skip_conn
 
         self.codebook_dim = codebook_dim
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
         self.strides = tuple_checker(strides, n_blocks)
+        self.scale_factor = np.prod(self.strides)
 
         if self.use_energy_transformer:
             assert ET_AVAILABLE, "Energy Transformer not available. Please install it by following readme instructions."
@@ -229,9 +232,19 @@ class CausalVQAE(torch.nn.Module):
         # last decoder layer
         decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
 
+        if self.multires_skip_conn:
+            self.multires_encode = MultiresScaleBlock(self.in_channels,
+                                                      channel_sizes[-1],
+                                                      scale_factor = 1 / self.scale_factor,
+                                                      kernel_size = 7,)
+            self.multires_decode = MultiresScaleBlock(channel_sizes[-1],
+                                                      self.in_channels,
+                                                      scale_factor = self.scale_factor,
+                                                      kernel_size = 7,)
+
         if input_format == "b l c":
             self.rearrange_in = einops.layers.torch.Rearrange("b l c -> b c l")
-            self.rearrange_in = einops.layers.torch.Rearrange("b c l -> b l c")
+            self.rearrange_out = einops.layers.torch.Rearrange("b c l -> b l c")
         else:
             self.rearrange_in = torch.nn.Identity()
             self.rearrange_out = torch.nn.Identity()
@@ -244,10 +257,34 @@ class CausalVQAE(torch.nn.Module):
             mean = x.mean(dim = -1, keepdim = True).detach()
             x = x - mean
 
+        x_quantized, commit_loss, index = self.encode(x, update_codebook, codebook_n, prioritize_early)
+
+        x = x_quantized
+
+        for decoder in self.decoders:
+            # each decoder takes the quantized from the previous decoder
+            x = decoder(x)
+
+        if self.multires_skip_conn:
+            x = x + self.multires_decode(x_quantized)
+
+        x = self.rearrange_out(x)
+
+        if self.zero_center:
+            x = x + mean
+ 
+        return x, commit_loss, index
+    
+    def encode(self, x, update_codebook = False, codebook_n = None, prioritize_early = False):
         x = self.rearrange_in(x)
+        x_in = x
 
         for encoder in self.encoders:
             x = encoder(x)
+
+        if self.multires_skip_conn:
+            x = x + self.multires_encode(x_in)
+
         x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
 
         x_quantized, index, commit_loss = self.quantizer(x, 
@@ -256,17 +293,7 @@ class CausalVQAE(torch.nn.Module):
                                                         prioritize_early = prioritize_early)
 
         x_quantized = einops.rearrange(x_quantized,
-                                        "b l c -> b c l" )
-
-        for decoder in self.decoders:
-            # each decoder takes the quantized from the previous decoder
-            x_quantized = decoder(x_quantized)
-
-        x_quantized = self.rearrange_out(x_quantized)
-
-        if self.zero_center:
-            x_quantized = x_quantized + mean
- 
+                                       "b l c -> b c l" )
         return x_quantized, commit_loss, index
     
     def sample(self, length = 225, device = "cuda", normal_var = 5e3, n_iters = 12):
@@ -322,13 +349,14 @@ if __name__ == "__main__":
                        num_quantizers = 8, 
                        codebook_size = 1024, 
                        input_format = "n c l",
-                       use_energy_transformer = False,)
+                       use_energy_transformer = False,
+                       vq_type = "ema")
     
     if test_sampling:
         y = model.sample(device = device)
         Audio(y[0].detach().cpu().numpy(), rate = 16000)
     else:
-        test_iterations = 100
+        test_iterations = 50
         om = torchaudio.load(r"om.wav")[0]
         om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
 
@@ -345,6 +373,7 @@ if __name__ == "__main__":
 
             loss.backward()
             optimizer.step()
+        animate_sound(om, model)
 
 
 

@@ -337,7 +337,7 @@ class ResidualQuantizer(torch.nn.Module):
             residual -= x_i.detach()
             inner_loss += inner_loss_i
             indices.append(index)
-        return x_hat, torch.stack(indices), inner_loss
+        return x_hat, torch.stack(indices, dim = -1), inner_loss
     
     def get_stale_clusters(self):
         """Get the number of stale clusters from all quantizers"""
