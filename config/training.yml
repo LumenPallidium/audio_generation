@@ -4,10 +4,10 @@ dataset : "commonvoice" # see utils.get_dataset for available datasets & example
 dataset_path : "D:/Projects/common_voice/"
 sample_rate : 48000
 
-use_discriminator : True
+use_discriminator : False
 scratch_train : False
 
-lr : 0.0002
+lr : 0.0005
 scheduler_warmup : 100 # most scheduler params are hardcoded atm
 
 vae_args : # args for the vae
@@ -16,23 +16,25 @@ vae_args : # args for the vae
   codebook_size : 1024
   input_format : "n c l"
   use_energy_transformer : False
-  vq_cutoff_freq : 0.1
-  use_som : False
+  vq_cutoff_freq : 1.5
+  use_som : True
   vq_type : "ema"
+  multires_skip_conn : False
+  p_normalization : 3
 
 trainer_args : # these are global args for the trainer
   batch_size : 8
   accumulation_steps : 16
   use_one_discriminator : True
   generator_loss_weight : 4
-  reconstruction_loss_weight : 10
+  reconstruction_loss_weight : 8
   codebook_update_step : 1
   steps_per_epoch: 30000
   noise_aug_scale : 0
-  discriminator_lr : 0.0003
+  discriminator_lr : 0.00035
 
 train_run_args : # these are args for a single run
-  epochs : 5
+  epochs : 11
   use_reconstruction_loss : True
   sparsity_weight : 0
   use_commit_loss : True

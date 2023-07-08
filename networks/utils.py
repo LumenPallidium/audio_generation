@@ -184,6 +184,8 @@ def sound_to_codebooks(sound, model):
         # get just the first batch
         indices = indices[0]
     indices = torch.nn.functional.one_hot(indices, num_classes = model.codebook_size[0])
+    # give each codebook a unique number
+    indices = indices * (torch.arange(indices.shape[1], 0, -1, device = indices.device).unsqueeze(0).unsqueeze(-1))
     # break into hw but join codebooks on width
     indices = rearrange(indices, "l nq (h w) -> l h w nq", h = h, w = w)
     indices = indices.sum(dim = -1)
@@ -197,30 +199,32 @@ def animate_sound(sound, model, rate = 16000, slowdown = 2):
     time_per_frame = time_len / codebooks.shape[0]
 
     fig, ax = plt.subplots()
-    cax = ax.pcolormesh(codebooks[0], cmap="Blues")
+    cax = ax.pcolormesh(codebooks[0], cmap="viridis")
 
     def animate(i):
         cax.set_array(codebooks[i])
 
     anim = animation.FuncAnimation(fig, animate, interval = 1000 * time_per_frame, frames = codebooks.shape[0])
-    anim.save("test.mp4")
+    anim.save("temp.mp4")
 
     sound_recons, _, _ = model(sound)
 
-    torchaudio.save("test.wav", sound_recons.squeeze(0), rate // slowdown)
+    torchaudio.save("temp.wav", sound_recons.squeeze(0).detach().cpu(), int(rate / slowdown))
 
     # reload video and add audio to it - not sure of a better way using matplotlib
     import ffmpeg
-    video = ffmpeg.input("test.mp4")
-    audio = ffmpeg.input("test.wav")
+    video = ffmpeg.input("temp.mp4")
+    audio = ffmpeg.input("temp.wav")
 
-    ffmpeg.output(video, audio, "output.mp4").run()
+    if os.path.exists("audio_codebook.mp4"):
+        # ffmpeg freezes if the file already exists
+        os.remove("audio_codebook.mp4")
+
+    ffmpeg.output(video, audio, "audio_codebook.mp4").run()
 
     # delete the intermediate files
-    os.remove("test.mp4")
-    os.remove("test.wav")
-
-
+    os.remove("temp.mp4")
+    os.remove("temp.wav")
 
 
     

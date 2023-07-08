@@ -165,13 +165,13 @@ class CausalVQAE(torch.nn.Module):
                  input_format = "b l c",
                  channel_multiplier = 2,
                  norm = torch.nn.Identity,
-                 zero_center = False,
                  depthwise = False,
                  use_energy_transformer = False,
                  n_heads = 8,
                  context_length = 225, # 72000 / 320, input length divided by downsample factor
                  use_som = True,
-                 multires_skip_conn = True,
+                 multires_skip_conn = False,
+                 p_normalization = 3
                  ):
         
         super().__init__()
@@ -180,9 +180,9 @@ class CausalVQAE(torch.nn.Module):
         self.n_layers_per_block = n_layers_per_block
         self.num_quantizers = num_quantizers
         self.vq_cutoff_freq = vq_cutoff_freq
-        self.zero_center = zero_center
         self.use_energy_transformer = use_energy_transformer
         self.multires_skip_conn = multires_skip_conn
+        self.p_normalization = p_normalization
 
         self.codebook_dim = codebook_dim
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
@@ -253,9 +253,6 @@ class CausalVQAE(torch.nn.Module):
         self.decoders = torch.nn.ModuleList(decoders)
 
     def forward(self, x, update_codebook = False, codebook_n = None, prioritize_early = False):
-        if self.zero_center:
-            mean = x.mean(dim = -1, keepdim = True).detach()
-            x = x - mean
 
         x_quantized, commit_loss, index = self.encode(x, update_codebook, codebook_n, prioritize_early)
 
@@ -269,9 +266,6 @@ class CausalVQAE(torch.nn.Module):
             x = x + self.multires_decode(x_quantized)
 
         x = self.rearrange_out(x)
-
-        if self.zero_center:
-            x = x + mean
  
         return x, commit_loss, index
     

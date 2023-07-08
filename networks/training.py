@@ -19,9 +19,13 @@ except ImportError:
 
 class WarmUpScheduler(object):
     """Copilot wrote this, made some small tweaks though."""
-    def __init__(self, optimizer, scheduler, warmup_iter, total_iter = 300000):
+    def __init__(self, optimizer, scheduler, warmup_iter, total_iter = 300000, min_lr = None):
+        if min_lr is None:
+            min_lr = optimizer.param_groups[0]['lr'] / 100
         self.optimizer = optimizer
-        self.scheduler = scheduler(optimizer, total_iter - warmup_iter)
+        self.scheduler = scheduler(optimizer, 
+                                   total_iter - warmup_iter, 
+                                   eta_min = min_lr)
         self.warmup_iter = warmup_iter
         self.iter = 0
     
@@ -47,7 +51,7 @@ class WarmUpScheduler(object):
 def multispectral_reconstruction_loss(original, 
                                    reconstruction,
                                    spectrograms,
-                                   windows = [2 ** i for i in range(6, 12)],
+                                   windows = [2 ** i for i in range(5, 12)],
                                    eps = 1e-8,
                                    spec_loss_weight = 1,
                                    use_log_l2 = True,
@@ -103,9 +107,9 @@ class Trainer():
                  mini_epoch_length = 100,
                  steps_per_epoch = None,
                  batch_size = 8,
-                 spec_windows = [2 **i for i in range(5, 12)],
+                 spec_windows = [2 ** i for i in range(5, 12)],
                  spec_bins = 64,
-                 save_every = 1,
+                 save_every = 5,
                  # these are based on experiments
                  spec_loss_weight = 0.01,
                  reconstruction_loss_weight = 10,
@@ -113,7 +117,9 @@ class Trainer():
                  loss_alpha = 0.95,
                  noise_aug_scale = 0.01,
                  cutoff_scale_per_epoch = 0.95,
-                 accumulation_steps = 8
+                 accumulation_steps = 8,
+                 frequency_filter = 4000, # human voice tends to max at 5k Hz
+                 codebook_frequency_scale = 0.05, # force deeper entries to hear higher frequencies
                  ):
         
         self.device = device
@@ -157,6 +163,8 @@ class Trainer():
                                "discriminator" : {}}
         
         self.noise_aug_scale = noise_aug_scale
+        self.frequency_filter = frequency_filter
+        self.codebook_frequency_scale = codebook_frequency_scale
         self.cutoff_scale_per_epoch = cutoff_scale_per_epoch
         
         # load discriminators
@@ -275,6 +283,7 @@ class Trainer():
                 discriminator = [self.discriminators[discriminator_number]]
                 optimizer_d = [self.optimizers[discriminator_number + 1]]
 
+
                 # chosen discriminator determines bitrate
                 codebook_n = self.codebook_options[discriminator_number]
             else:
@@ -300,6 +309,13 @@ class Trainer():
 
                 x = next(data_loader_iter)
                 x = torch.vstack(x).unsqueeze(1).to(self.device)
+
+                if self.frequency_filter is not None:
+                    # this makes so deeper codebook entries tend to hear more high freqs
+                    cutoff_freq = self.frequency_filter * (1 + codebook_n * self.codebook_frequency_scale)
+                    x = torchaudio.functional.lowpass_biquad(x, 
+                                                             sample_rate = self.sample_rate, 
+                                                             cutoff_freq = cutoff_freq)
 
                 if self.noise_aug_scale:
                     x_ = x + torch.randn_like(x) * self.noise_aug_scale
@@ -353,7 +369,11 @@ class Trainer():
                     self.update_loss_breakdown(discriminator_loss, f"{discriminator_i.name}_loss", type = "discriminator")
                     discriminator_loss.backward(retain_graph = True)
 
-                loss.backward()
+                if torch.isnan(loss):
+                    print(losses)
+                    raise ValueError(f"NaN loss during iteration {i} of mini-epoch {self.mini_epoch_i}")
+                else:
+                    loss.backward()
 
             if losses is not None:
                 losses.append(loss.item())
@@ -451,6 +471,11 @@ class Trainer():
 
             self.epoch += 1
 
+        torch.save(self.model.state_dict(), self.save_path + f"model_epoch_{self.epoch}_final.pt")
+        if gan_loss:
+            for discriminator_i in self.discriminators:
+                torch.save(discriminator_i.state_dict(), self.save_path + f"{discriminator_i.name}_{self.epoch}_final.pt")
+
         if losses:
             plt.plot(utils.losses_to_running_loss(losses))
             plt.show()
@@ -535,8 +560,6 @@ class Trainer():
 #TODO : test adding regressor variables (eg speaker gender)
 #TODO : clean up discriminator set up - maybe make it default?
 #TODO : maybe look into loss balancer like encodec uses
-#TODO : maybe add funtionality for selecting existing experiment
-#TODO : maybe add function to continue epochs from existing experiment
 #TODO : make discriminator energy calcs a method or something
 if __name__ == "__main__":
     config = yaml.safe_load(open("../config/training.yml", "r"))

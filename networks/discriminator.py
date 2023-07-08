@@ -214,7 +214,7 @@ def discriminator_generator_loss(original,
     for x, y, y_disc in zip(original_d, reconstruction_d, reconstruction_d2):
         discriminator_loss += (relu_f(1 - x) + relu_f(1 + y_disc)).mean() / k
         # extra loss term to ensure real and fake are seperated
-        discriminator_loss += seperation_loss / torch.abs(x - y_disc).mean()
+        discriminator_loss += seperation_loss / torch.abs(x - y_disc + 1e-3).mean()
 
         generation_loss += relu_f(1 - y).mean() / k
 
@@ -224,7 +224,7 @@ def discriminator_generator_loss(original,
     for x, y in zip(original_features, reconstruction_features):
         feature_loss_i = l1_f(x, y) / n_features
         if scale_feature_loss:
-            feature_loss_i /= torch.abs(x).mean()
+            feature_loss_i /= torch.abs(x + 1e-3).mean()
 
         feature_loss += feature_loss_i
 
