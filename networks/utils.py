@@ -178,7 +178,9 @@ def sound_to_codebooks(sound, model):
         # i was too verbose with my class stuff
         h = model.quantizer.quantizers[0].som.height
         w = model.quantizer.quantizers[0].som.width
+    model.eval()
     _, _, indices = model.encode(sound)
+    model.train()
     # indices has shape batch, length, num_quantizers
     if len(indices.shape) == 3:
         # get just the first batch
@@ -191,8 +193,10 @@ def sound_to_codebooks(sound, model):
     indices = indices.sum(dim = -1)
     return indices
 
-def animate_sound(sound, model, rate = 16000, slowdown = 2):
+def animate_sound(sound, model, rate = 16000, slowdown = 1):
     from matplotlib import animation
+    if len(sound.shape) == 2:
+        sound = sound.unsqueeze(0)
     codebooks = sound_to_codebooks(sound, model).cpu().numpy()
 
     time_len = sound.shape[-1] * slowdown / rate

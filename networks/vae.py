@@ -171,7 +171,6 @@ class CausalVQAE(torch.nn.Module):
                  context_length = 225, # 72000 / 320, input length divided by downsample factor
                  use_som = True,
                  multires_skip_conn = False,
-                 p_normalization = 3
                  ):
         
         super().__init__()
@@ -182,7 +181,6 @@ class CausalVQAE(torch.nn.Module):
         self.vq_cutoff_freq = vq_cutoff_freq
         self.use_energy_transformer = use_energy_transformer
         self.multires_skip_conn = multires_skip_conn
-        self.p_normalization = p_normalization
 
         self.codebook_dim = codebook_dim
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
