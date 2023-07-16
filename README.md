@@ -8,6 +8,7 @@ If you are interested in a general implementation of Soundstream or a neural aud
 
 
 * I've implemented [multiresolution convolutions](https://arxiv.org/abs/2305.01638), see the networks/wavelets.py file (which also includes an attempt at a wavelet-based upscaler). While they are implemented, these are not currently integrated into the main VQ-VAE model
+* In a similar vein to above, I implemented a custom type of layer I call a wavelet layer. The standard neural audio codec method of using upsampling and convolutions to increase the resolution seemed like it ignored a key piece of information: sound is composed of waves. Wavelet layers are special upsampling layers that try and implicitly learn a wavelet decomposition and upsample it.
 * I've added [modern self-organizing maps](https://arxiv.org/abs/2302.07950) to the codebooks, see networks/som_utils.py. I also include a test on CIFAR which makes pretty pictures. 
 
 
@@ -42,6 +43,7 @@ The advantage of fully convolutional encoders and decoders is that they allow ar
 As of this writing, the main differences between this implementation and the original Soundstream paper are:
 
 * Different parameters, activations, etc. in general
+* The addition of wavelet and (causal) multiresolution convolution layers
 * Addition of some objectives from encodec, such as using more discriminators and multispectral windows
 * The STFT discriminators don't act over complex numbers, they are in a 2-channel real domain (this ran much better on older versions of PyTorch, it's likely no longer neccesary)
 * The option to use an energy-transformer as a bottleneck layer. This is a Hopfield inspired model that has some similarity to residual vector quantization - unlike a traditional transformer, the residual of the input is repeatedly run through the network (which fulfills the process of energy minimization). This bottleneck led to a much stronger model than the using RVQ.
