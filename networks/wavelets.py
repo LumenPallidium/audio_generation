@@ -9,14 +9,14 @@ class WaveletLayer(torch.nn.Module):
                  in_channels,
                  hidden_channels,
                  out_channels = None,
-                 wavelet_kernel_size = 13,
-                 center_kernel_size = 13,
-                 out_conv_kernel_size = 8,
+                 wavelet_kernel_size = 7,
+                 out_conv_kernel_size = 7,
                  scale_factor = 2,
-                 n_points = 10,
+                 n_points = 16,
                  interval = (-5, 5),):
         
         super().__init__()
+        assert n_points % scale_factor == 0, "n_points must be divisible by scale_factor"
 
         self.in_channels = in_channels
         if out_channels is None:
@@ -24,7 +24,6 @@ class WaveletLayer(torch.nn.Module):
         self.out_channels = out_channels
 
         self.wavelet_kernel_size = wavelet_kernel_size
-        self.center_kernel_size = center_kernel_size
         self.out_conv_kernel_size = out_conv_kernel_size
 
         self.n_points = n_points
@@ -41,22 +40,31 @@ class WaveletLayer(torch.nn.Module):
         self.conv_out = torch.nn.Conv1d(self.hidden_channels, 
                                         self.out_channels, 
                                         self.out_conv_kernel_size, 
-                                        padding = (self.out_conv_kernel_size // 2))
+                                        padding = "same")
 
-        self.register_buffer("space", einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n"))
-        self.register_buffer("f_i", 1 / torch.sqrt(torch.log(torch.tensor(2))))
+        space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
+        # the spatial extent of the wavelet is constant, so we can precompute it
+        self.wavelet_kernel = torch.cos(space) * torch.exp((-space**2))
 
     def forward(self, x):
+        # this conv converts the input to frequency space
         x = self.conv_in(x).unsqueeze(-1)
 
-        y = torch.cos(self.space) * torch.exp((-self.space**2) * torch.abs(x))
+        # multiply conv by wavelet kernel (shape is (batch, channels, length, space))
+        y = self.wavelet_kernel * torch.abs(x)
         
         # blend wavelet space and length
-        y = einops.rearrange(y, "b c l s -> b c (l s)")
-        y = y.unfold(-1, self.n_points, self.fold_dim).sum(dim = -1)
+        y = einops.rearrange(y, "b c l s -> b c (l s)") 
+        expected_length = y.shape[-1] // self.fold_dim
+        y_out = y.unfold(-1, self.n_points, self.fold_dim).sum(dim = -1)
+
+        # unfortunately have to do some annoying padding
+        size_diff = y_out.shape[-1] - expected_length
+        if size_diff < 0:
+            y_out = torch.cat([y_out, y[..., size_diff:]], dim = -1)
         
-        y = self.conv_out(y)
-        return y
+        y_out = self.conv_out(y_out)
+        return y_out
 
     
 def causal_functional_conv1d(x, 
@@ -173,15 +181,46 @@ class MultiresScaleBlock(torch.nn.Module):
         x = torch.nn.functional.interpolate(x, scale_factor = self.scale_factor)
         x = self.conv(x)
         return self.activation(x)
+    
+def test_wavelet(test_iterations = 1000, scale_factor = 2, plot_losses = False):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-if __name__ == "__main__":
-    # testing on what is effectively fourier decomposition
-    from tqdm import tqdm
-    import torchaudio
-    from utils import losses_to_running_loss
-    test_iterations = 500
-    num_freqs = 6
-    interval = torch.arange(-1, 1, 0.01)
+    waver = WaveletLayer(1, 2, scale_factor = scale_factor).to(device)
+    optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
+
+    om = torchaudio.load(r"om.wav")[0]
+    om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
+
+    om = torch.nn.functional.interpolate(om, size = 2 ** 14)
+    x_ds = torch.nn.functional.interpolate(om, 
+                                           scale_factor = 1 / scale_factor)
+
+    fig, ax = plt.subplots()
+    x_hats = []
+    losses = []
+    for i in tqdm(range(test_iterations)):
+        optimizer.zero_grad()
+        noise = torch.randn_like(x_ds) * 1e-3
+        x_i = x_ds + noise
+
+        x_hat = waver(x_i)
+
+        loss = torch.nn.functional.mse_loss(x_hat, om)
+        loss.backward()
+        optimizer.step()
+
+        x_hats.append(x_hat.squeeze().squeeze().detach().cpu().numpy())
+        losses.append(loss.item())
+
+    if plot_losses:
+        plt.plot(losses)
+    else:
+        ax.plot(x_hats[-1], label = "reconstructed")
+        ax.plot(om.squeeze().squeeze().detach().cpu().numpy(), label = "original")
+    plt.show()
+    
+
+def test_multires(test_iterations = 500, num_freqs = 6, interval = torch.arange(-1, 1, 0.01)):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = torch.nn.Sequential(torch.nn.Conv1d(1, num_freqs, 1, padding = "same"),
@@ -212,9 +251,22 @@ if __name__ == "__main__":
         for param_group in optimizer.param_groups:
             param_group['lr'] = param_group['lr'] * 0.99
 
-
     log_losses = np.log(losses)
     plt.plot(losses_to_running_loss(log_losses))
-    
+    plt.show()
+
+if __name__ == "__main__":
+    # testing on what is effectively fourier decomposition
+    from tqdm import tqdm
+    import torchaudio
+    from utils import losses_to_running_loss
+    wavelet_iters = 1000
+    multires_iters = 0
+
+    if wavelet_iters:
+        test_wavelet(test_iterations = wavelet_iters, scale_factor = 4)
+
+    if multires_iters:
+        test_multires(test_iterations = multires_iters)
 
 
