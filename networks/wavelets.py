@@ -5,6 +5,28 @@ import matplotlib.pyplot as plt
 from math import ceil, sqrt
 
 class WaveletLayer(torch.nn.Module):
+    """A layer that uses convolutions to project an input to a wavelet frequency basis, generating wavelets.
+    Then, it uses a convolution to modify the output wavelet.
+    
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    hidden_channels : int
+        Number of hidden channels.
+    out_channels : int
+        Number of output channels, defaults to in_channels.
+    wavelet_kernel_size : int
+        Size of the wavelet kernel.
+    out_conv_kernel_size : int
+        Size of the output convolution kernel.
+    scale_factor : int
+        The scale factor of the wavelet. The wavelet will be scaled by this factor.
+    n_points : int
+       The number of points used for the wavelet. Must be divisible by scale_factor.
+    interval : tuple
+        The interval over which the wavelet is defined. 
+    """
     def __init__(self,
                  in_channels,
                  hidden_channels,
@@ -13,7 +35,7 @@ class WaveletLayer(torch.nn.Module):
                  out_conv_kernel_size = 7,
                  scale_factor = 2,
                  n_points = 16,
-                 interval = (-5, 5),):
+                 interval = (-2, 2),):
         
         super().__init__()
         assert n_points % scale_factor == 0, "n_points must be divisible by scale_factor"

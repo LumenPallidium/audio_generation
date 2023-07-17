@@ -4,7 +4,7 @@ import einops
 import numpy as np
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
-from wavelets import MultiresScaleBlock
+from wavelets import MultiresScaleBlock, WaveletLayer
 from utils import add_util_norm, animate_sound
 try:
     from energy_transformer import EnergyTransformer
@@ -131,11 +131,18 @@ class CausalDecoderBlock(torch.nn.Module):
                  stride,
                  n_layers = 4,
                  activation = torch.nn.LeakyReLU(negative_slope=0.3),
-                 depthwise = False):
+                 depthwise = False,
+                 wavelet = False):
         super().__init__()
+        self.wavelet = wavelet
+
         dilations = [3**i for i in range(n_layers - 1)]
-        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
-                                           activation)
+        if self.wavelet:
+            self.in_conv = torch.nn.Sequential(WaveletLayer(in_channels, out_channels, out_channels = out_channels, scale_factor = stride),
+                                               activation)
+        else:
+            self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
+                                               activation)
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
@@ -168,9 +175,10 @@ class CausalVQAE(torch.nn.Module):
                  depthwise = False,
                  use_energy_transformer = False,
                  n_heads = 8,
-                 context_length = 225, # 72000 / 320, input length divided by downsample factor
+                 context_length = None, # input length divided by downsample factor (320 for default config)
                  use_som = True,
                  multires_skip_conn = False,
+                 wavelet_decoders = [True, False, False, False],
                  ):
         
         super().__init__()
@@ -187,8 +195,17 @@ class CausalVQAE(torch.nn.Module):
         self.strides = tuple_checker(strides, n_blocks)
         self.scale_factor = np.prod(self.strides)
 
+        if isinstance(wavelet_decoders, (list, tuple)):
+            assert len(wavelet_decoders) == n_blocks, "Number of wavelet decoders must match number of blocks."
+            # reverse the list since we iterate backwards
+            wavelet_decoders = wavelet_decoders[::-1]
+            self.wavelet_decoders = wavelet_decoders
+        else:
+            self.wavelet_decoders = [wavelet_decoders] * n_blocks
+
         if self.use_energy_transformer:
             assert ET_AVAILABLE, "Energy Transformer not available. Please install it by following readme instructions."
+            assert context_length is not None, "Context length must be specified when using Energy Transformer."
             self.quantizer = EnergyTransformer(codebook_dim,
                                                codebook_dim,
                                                n_heads = n_heads,
@@ -196,11 +213,11 @@ class CausalVQAE(torch.nn.Module):
                                                n_iters_default = num_quantizers)
         else:
             self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
-                                            dim = codebook_dim, 
-                                            quantizer_class = vq_type, 
-                                            codebook_sizes = codebook_size,
-                                            vq_cutoff_freq = vq_cutoff_freq,
-                                            use_som = use_som)
+                                               dim = codebook_dim, 
+                                               quantizer_class = vq_type, 
+                                               codebook_sizes = codebook_size,
+                                               vq_cutoff_freq = vq_cutoff_freq,
+                                               use_som = use_som)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 
@@ -221,11 +238,13 @@ class CausalVQAE(torch.nn.Module):
         decoders = [CausalConvT1d(codebook_dim, channel_sizes[-1], 7)]
 
         for i in range(self.n_blocks, 0 , -1):
+            wavelet_bool = self.wavelet_decoders[i - 1]
             decoders.append(CausalDecoderBlock(channel_sizes[i], 
                                                channel_sizes[i - 1], 
                                                self.strides[i - 1], 
                                                n_layers = self.n_layers_per_block,
-                                               depthwise = depthwise))
+                                               depthwise = depthwise,
+                                               wavelet = wavelet_bool))
             
         # last decoder layer
         decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
