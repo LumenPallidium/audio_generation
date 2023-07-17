@@ -481,42 +481,6 @@ class Trainer():
             plt.show()
 
         return losses
-
-    def overtrain(self, batch_size = 16, n_steps = 5000):
-        """Overtrains on a single sample from the data. Used for testing."""
-        def param_sum(model):
-            return sum(p.sum() for p in model.parameters() if p.requires_grad)
-
-        start_param_sum = param_sum(self.model)
-
-        train_loader = torch.utils.data.DataLoader(self.dataset,
-                                                   batch_size=1,
-                                                   collate_fn=lambda x : utils.collator(x, resampler=self.resampler))
-        optimizer = torch.optim.Adam(model.parameters(), lr = 5e-6)
-        x = next(iter(train_loader))[0]
-
-        x = x.repeat(batch_size, 1, 1).to(self.device)
-
-        for step in tqdm(range(n_steps // batch_size)):
-            
-            y, commit_loss, index = self.model(x, update_codebook = True)
-
-            loss = torch.mean((y - x).pow(2)) + commit_loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            if step % 50 == 0:
-                torchaudio.save("C:/Projects/test.wav", y[0].detach().cpu(), self.sample_rate)
-
-        end_param_sum = param_sum(self.model)
-
-        print("Param sum before overtraining: ", start_param_sum)
-        print("Param sum after overtraining: ", end_param_sum)
-        print("Param sum difference: ", end_param_sum - start_param_sum)
-
-        return y[0].detach().cpu()
     
     def sample_data(self):
         i = np.random.randint(0, len(self.dataset))

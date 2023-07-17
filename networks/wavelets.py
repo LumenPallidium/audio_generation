@@ -66,7 +66,7 @@ class WaveletLayer(torch.nn.Module):
 
         space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
         # the spatial extent of the wavelet is constant, so we can precompute it
-        self.wavelet_kernel = torch.cos(space) * torch.exp((-space**2))
+        self.register_buffer("wavelet_kernel", torch.cos(space) * torch.exp((-space**2)))
 
     def forward(self, x):
         # this conv converts the input to frequency space

@@ -132,17 +132,22 @@ class CausalDecoderBlock(torch.nn.Module):
                  n_layers = 4,
                  activation = torch.nn.LeakyReLU(negative_slope=0.3),
                  depthwise = False,
-                 wavelet = False):
+                 wavelet = False,
+                 wavelet_hidden_ratio = 1):
         super().__init__()
         self.wavelet = wavelet
 
         dilations = [3**i for i in range(n_layers - 1)]
         if self.wavelet:
-            self.in_conv = torch.nn.Sequential(WaveletLayer(in_channels, out_channels, out_channels = out_channels, scale_factor = stride),
+            self.wavelet = torch.nn.Sequential(WaveletLayer(in_channels, 
+                                                            out_channels * wavelet_hidden_ratio,
+                                                            out_channels = out_channels, 
+                                                            scale_factor = stride,
+                                                            n_points = 2 * stride * wavelet_hidden_ratio),
                                                activation)
-        else:
-            self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
-                                               activation)
+
+        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
+                                            activation)
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
@@ -152,7 +157,11 @@ class CausalDecoderBlock(torch.nn.Module):
         self.layers = torch.nn.ModuleList(layers)
 
     def forward(self, x):
-        x = self.in_conv(x)
+        if self.wavelet:
+            x = self.in_conv(x) + self.wavelet(x)
+        else:
+            x = self.in_conv(x)
+
         for layer in self.layers:
             x = layer(x)
         return x
@@ -178,7 +187,7 @@ class CausalVQAE(torch.nn.Module):
                  context_length = None, # input length divided by downsample factor (320 for default config)
                  use_som = True,
                  multires_skip_conn = False,
-                 wavelet_decoders = [True, False, False, False],
+                 wavelet_decoders = [False, True, False, False],
                  ):
         
         super().__init__()
