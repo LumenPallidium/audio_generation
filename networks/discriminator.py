@@ -228,3 +228,8 @@ def discriminator_generator_loss(original,
     generator_loss = generation_loss + feature_multipier * feature_loss
 
     return generator_loss, discriminator_loss
+
+if __name__ == "__main__":
+    input_t = torch.randn(1, 1, 72000)
+    disc = STFTDiscriminator(win_length = 128)
+    disc(input_t)

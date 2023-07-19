@@ -22,7 +22,7 @@ vae_args : # args for the vae
   multires_skip_conn : False
 
 trainer_args : # these are global args for the trainer
-  batch_size : 2
+  batch_size : 1
   accumulation_steps : 64
   use_one_discriminator : False
   generator_loss_weight : 4
