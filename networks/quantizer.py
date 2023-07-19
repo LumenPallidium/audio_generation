@@ -30,7 +30,8 @@ class BaseQuantizer(torch.nn.Module):
                  init_scale = 1.0,
                  new_code_noise : float = 1e-9,
                  use_som : bool = False,
-                 som_neighbor_distance : int = 6,):
+                 som_neighbor_distance : int = 6,
+                 dist_type : str = "cos",):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
@@ -40,11 +41,16 @@ class BaseQuantizer(torch.nn.Module):
         self.new_code_noise : float = new_code_noise
         self.use_som = use_som
         self.ema = False # flag for the occaisonal conditional update
+        self.dist_type = dist_type
 
         self.stale_clusters = None
 
-        # initialize codebook as parameter to enable optimization
-        self.codebook = torch.nn.Parameter(torch.randn(dim, codebook_size) * init_scale)
+        if self.dist_type == "cos":
+            self.codebook = torch.nn.Parameter(F.normalize(torch.randn(dim, codebook_size), 
+                                                           dim = 0))
+        else:
+            # initialize codebook as parameter to enable optimization
+            self.codebook = torch.nn.Parameter(torch.randn(dim, codebook_size) * init_scale)
         # initalize a count that each codebook entry appears
         self.register_buffer("cluster_frequency", torch.ones(codebook_size))
 
@@ -54,21 +60,33 @@ class BaseQuantizer(torch.nn.Module):
                                kernel_type = "gaussian",
                                neighbor_distance = som_neighbor_distance,)
 
+    def codebook_euclidean_d(self, x_flat):
+
+        # distances, note this is ~~ (flatten - codebook)T @ (flatten - codebook), where T is the transpose
+        # TODO : look into replacing this with torch.cdist
+        dist = (
+            x_flat.pow(2).sum(-1, keepdim=True)
+            - 2 * x_flat @ self.codebook
+            + self.codebook.pow(2).sum(0, keepdim=True)
+        )
+
+        # get the closest codebook entry
+        min_dist, codebook_index = torch.min(dist, dim = -1)
+        return codebook_index
+    
+    def codebook_cosine_d(self, x_flat):
+        dist = torch.einsum("bld,dn -> bln", x_flat, self.codebook)
+        min_dist, codebook_index = torch.max(dist, dim = -1)
+        return codebook_index
 
     def quantize(self, input):
         """Quantize the input. Returns the index of the closest codebook entry for each input element."""
         flatten = einops.rearrange(input, "b ... d -> b (...) d")
 
-        # distances, note this is ~~ (flatten - codebook)T @ (flatten - codebook), where T is the transpose
-        # TODO : look into replacing this with torch.cdist
-        dist = (
-            flatten.pow(2).sum(-1, keepdim=True)
-            - 2 * flatten @ self.codebook
-            + self.codebook.pow(2).sum(0, keepdim=True)
-        )
-
-        # get the closest codebook entry
-        min_dist, codebook_index = torch.min(dist, dim=-1)
+        if self.dist_type == "cos":
+            codebook_index = self.codebook_cosine_d(flatten)
+        else:
+            codebook_index = self.codebook_euclidean_d(flatten)
 
         return codebook_index, flatten
 
@@ -166,11 +184,14 @@ class BaseQuantizer(torch.nn.Module):
                 self.cluster_frequency[low_clusters] += 1
         
 
-    def forward(self, x, update_codebook : bool = False):
+    def forward(self, x_in, update_codebook : bool = False):
         """Quantize and dequantize the input. Returns the quantized input, the index of the codebook entry for each
         input element, and the commitment loss. Note that update_codebook means to reassign input vectors to 
         codebook entries that are poorly represented; the codebook updates via gradient descent (or
         k-means for the EMAQuantizer) regardless of this flag."""
+        x = x_in.clone()
+        if self.dist_type == "cos":
+            x = F.normalize(x, dim = -1)
         codebook_index, x_flat = self.quantize(x)
         x_quantized = self.dequantize(codebook_index)
 
@@ -446,7 +467,6 @@ if __name__ == "__main__":
         torch.nn.LayerNorm(embed_dim),
         torch.nn.ReLU(),
         torch.nn.Linear(embed_dim, patch_dim)).to(device)
-
 
     # test the quantizers
     if test_base:

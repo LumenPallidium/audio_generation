@@ -108,7 +108,7 @@ class Trainer():
                  steps_per_epoch = None,
                  batch_size = 8,
                  spec_windows = [2 ** i for i in range(5, 12)],
-                 spec_bins = 64,
+                 spec_bins = [5 * (2 ** i) for i in range(0, 7)],
                  save_every = 5,
                  # these are based on experiments
                  spec_loss_weight = 0.01,
@@ -152,8 +152,8 @@ class Trainer():
                                                         n_fft = max(window, 512),
                                                         win_length = window,
                                                         hop_length = window // 4,
-                                                        n_mels = spec_bins,
-                                                        normalized = True).to(self.device) for window in spec_windows]
+                                                        n_mels = spec_bin,
+                                                        normalized = True).to(self.device) for spec_bin, window in zip(spec_bins, spec_windows)]
         self.spec_loss_weight = spec_loss_weight
         self.reconstruction_loss_weight = reconstruction_loss_weight
         self.generator_loss_weight = generator_loss_weight
@@ -485,16 +485,16 @@ class Trainer():
     def sample_data(self):
         i = np.random.randint(0, len(self.dataset))
         x = self.dataset[i]
-        x = utils.collator([x], resampler=self.resampler)[0]
+        x = utils.collator([x], size = 72000 * 5, resampler=self.resampler)[0]
         x = x.to(self.device).unsqueeze(0)
 
         model.eval()
         with torch.no_grad():
-          y, _, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
+          y, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
 
         # switch back to train mode
         model.train()
-        Audio(y[0].detach().cpu().numpy(), rate = self.sample_rate)
+        return y[0].detach().cpu().numpy()
 
     def train_new_quantizer(self, 
                             new_quantizer, 
@@ -525,6 +525,9 @@ class Trainer():
 #TODO : clean up discriminator set up - maybe make it default?
 #TODO : maybe look into loss balancer like encodec uses
 #TODO : make discriminator energy calcs a method or something
+#TODO : convert discriminator back to complex
+#TODO : look into codebook factorization
+
 if __name__ == "__main__":
     config = yaml.safe_load(open("../config/training.yml", "r"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
