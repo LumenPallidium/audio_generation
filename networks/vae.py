@@ -89,7 +89,7 @@ class CausalResidualBlock1d(torch.nn.Module):
             self.conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=bias)
 
         self.conv2 = CausalConv1d(out_channels, out_channels, 1, bias=bias)
-        self.activation = activation(in_channels)
+        self.activation = activation(out_channels)
         self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, x):
@@ -115,7 +115,7 @@ class CausalEncoderBlock(torch.nn.Module):
                                                             depthwise = depthwise),
                                       activation(in_channels)) for dilation in dilations]
         layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
-                                          activation(in_channels)))
+                                          activation(out_channels)))
 
         self.layers = torch.nn.ModuleList(layers)
 
@@ -145,15 +145,15 @@ class CausalDecoderBlock(torch.nn.Module):
                                                             scale_factor = stride,
                                                             wavelet_kernel_size = 2 * stride + 1,
                                                             n_points = 2 * stride * wavelet_hidden_ratio),
-                                               activation(in_channels))
+                                               activation(out_channels))
 
         self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
-                                            activation(in_channels))
+                                            activation(out_channels))
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
                                                             depthwise = depthwise),
-                                      activation(in_channels)) for dilation in dilations]
+                                      activation(out_channels)) for dilation in dilations]
         
         self.layers = torch.nn.ModuleList(layers)
 

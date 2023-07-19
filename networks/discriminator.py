@@ -33,7 +33,7 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
                                                       kernel_sizes[i], stride = strides[i], 
                                                       groups = groups[i]),
                                                       norm = norm),
-                                      activation(in_channels)) for i in range(n_steps - 1)]
+                                      activation(self.channel_sizes[i + 1])) for i in range(n_steps - 1)]
         
         # last layer does not have activation
         layers.append(add_util_norm(torch.nn.Conv1d(channel_sizes[-1], 1, kernel_sizes[-1], stride = strides[-1], groups = groups[-1]),
@@ -95,16 +95,16 @@ class STFTDiscriminatorBlock(torch.nn.Module):
             padding = ((kernel_size[0] - 1) // 2, (kernel_size[1] - 1) // 2)
 
         self.layers = torch.nn.Sequential(add_util_norm(torch.nn.Conv2d(in_channels, 
-                                                          in_channels, 
-                                                          kernel_size = 3,
-                                                          padding = 1),
-                                                         norm = norm),
-                                           activation(in_channels),
+                                                                        in_channels, 
+                                                                        kernel_size = 3,
+                                                                        padding = 1),
+                                                        norm = norm),
+                                           activation(in_channels, dim = 2),
                                            add_util_norm(torch.nn.Conv2d(in_channels, 
-                                                           in_channels * channel_multiplier, 
-                                                           stride = stride, 
-                                                           kernel_size = kernel_size,
-                                                           padding = padding),
+                                                                         in_channels * channel_multiplier, 
+                                                                         stride = stride, 
+                                                                         kernel_size = kernel_size,
+                                                                         padding = padding),
                                                          norm = norm),)
         
 
@@ -112,9 +112,8 @@ class STFTDiscriminatorBlock(torch.nn.Module):
         return self.layers(x)# + x
 
 class STFTDiscriminator(torch.nn.Module):
-    """This is a discriminator based on the Short-Time Fourier Transform. In the paper,
-    it uses the complex STFT, but here we use the real STFT, mostly because optimization
-    of the complex STFT takes MUCH longer."""
+    """This is a discriminator based on the Short-Time Fourier Transform. Works in the complex
+    domain."""
     def __init__(self,
                  in_channels = 2,
                  first_channel_size = 32,

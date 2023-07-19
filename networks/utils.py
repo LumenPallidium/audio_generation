@@ -56,10 +56,16 @@ def snake_activation(x, alpha, eps = 1e-6):
 
 class Snek(torch.nn.Module):
     def __init__(self,
-                 in_channels):
+                 in_channels,
+                 dim = 1):
         """Layer with learnable parameters for the snake activations"""
         super().__init__()
-        self.alphas = torch.nn.Parameter(torch.ones(1, in_channels, 1))
+        if dim == 1:
+            self.alphas = torch.nn.Parameter(torch.ones(1, in_channels, 1))
+        elif dim == 2:
+            self.alphas = torch.nn.Parameter(torch.ones(1, in_channels, 1, 1))
+        else:
+            raise ValueError("Snek cannot handle such dims")
     
     def forward(self, x):
         return snake_activation(x, self.alphas)
