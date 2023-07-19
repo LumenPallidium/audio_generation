@@ -108,7 +108,7 @@ class Trainer():
                  steps_per_epoch = None,
                  batch_size = 8,
                  spec_windows = [2 ** i for i in range(5, 12)],
-                 spec_bins = 64,
+                 spec_bins = [5 * (2 ** i) for i in range(0, 7)],
                  save_every = 5,
                  # these are based on experiments
                  spec_loss_weight = 0.01,
@@ -152,8 +152,8 @@ class Trainer():
                                                         n_fft = max(window, 512),
                                                         win_length = window,
                                                         hop_length = window // 4,
-                                                        n_mels = spec_bins,
-                                                        normalized = True).to(self.device) for window in spec_windows]
+                                                        n_mels = spec_bin,
+                                                        normalized = True).to(self.device) for spec_bin, window in zip(spec_bins, spec_windows)]
         self.spec_loss_weight = spec_loss_weight
         self.reconstruction_loss_weight = reconstruction_loss_weight
         self.generator_loss_weight = generator_loss_weight
@@ -528,8 +528,6 @@ class Trainer():
 #TODO : convert discriminator back to complex
 #TODO : codebook normalization L2
 #TODO : look into codebook factorization
-#TODO: ensure that frequency domain loss matches new paper
-#TODO: try new paper loss weighting
 
 if __name__ == "__main__":
     config = yaml.safe_load(open("../config/training.yml", "r"))

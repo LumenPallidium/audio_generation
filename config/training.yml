@@ -25,7 +25,7 @@ trainer_args : # these are global args for the trainer
   batch_size : 1
   accumulation_steps : 64
   use_one_discriminator : False
-  generator_loss_weight : 4
+  generator_loss_weight : 1
   reconstruction_loss_weight : 8
   codebook_update_step : 1
   steps_per_epoch: 30000
