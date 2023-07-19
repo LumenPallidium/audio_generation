@@ -526,7 +526,6 @@ class Trainer():
 #TODO : maybe look into loss balancer like encodec uses
 #TODO : make discriminator energy calcs a method or something
 #TODO : convert discriminator back to complex
-#TODO : codebook normalization L2
 #TODO : look into codebook factorization
 
 if __name__ == "__main__":
