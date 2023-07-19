@@ -526,7 +526,6 @@ class Trainer():
 #TODO : maybe look into loss balancer like encodec uses
 #TODO : make discriminator energy calcs a method or something
 #TODO : convert discriminator back to complex
-#TODO: replace relu with snake activation
 #TODO : codebook normalization L2
 #TODO : look into codebook factorization
 #TODO: ensure that frequency domain loss matches new paper

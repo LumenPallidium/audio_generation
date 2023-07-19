@@ -5,7 +5,7 @@ import numpy as np
 from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
 from wavelets import MultiresScaleBlock, WaveletLayer
-from utils import add_util_norm, animate_sound
+from utils import add_util_norm, animate_sound, Snek
 try:
     from energy_transformer import EnergyTransformer
     ET_AVAILABLE = True
@@ -78,7 +78,7 @@ class CausalResidualBlock1d(torch.nn.Module):
                  kernel_size = 7, 
                  dilation=1, 
                  bias=True, 
-                 activation=torch.nn.LeakyReLU(negative_slope=0.3),
+                 activation=Snek,
                  dropout = 0.0,
                  depthwise = False):
         super().__init__()
@@ -89,7 +89,7 @@ class CausalResidualBlock1d(torch.nn.Module):
             self.conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=bias)
 
         self.conv2 = CausalConv1d(out_channels, out_channels, 1, bias=bias)
-        self.activation = activation
+        self.activation = activation(in_channels)
         self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, x):
@@ -104,7 +104,7 @@ class CausalEncoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = torch.nn.LeakyReLU(negative_slope=0.3),
+                 activation = Snek,
                  depthwise = False):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
@@ -113,9 +113,9 @@ class CausalEncoderBlock(torch.nn.Module):
                                                             in_channels, 
                                                             dilation=dilation,
                                                             depthwise = depthwise),
-                                      activation) for dilation in dilations]
+                                      activation(in_channels)) for dilation in dilations]
         layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
-                                          activation))
+                                          activation(in_channels)))
 
         self.layers = torch.nn.ModuleList(layers)
 
@@ -130,7 +130,7 @@ class CausalDecoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = torch.nn.LeakyReLU(negative_slope=0.3),
+                 activation = Snek,
                  depthwise = False,
                  wavelet = False,
                  wavelet_hidden_ratio = 2):
@@ -145,15 +145,15 @@ class CausalDecoderBlock(torch.nn.Module):
                                                             scale_factor = stride,
                                                             wavelet_kernel_size = 2 * stride + 1,
                                                             n_points = 2 * stride * wavelet_hidden_ratio),
-                                               activation)
+                                               activation(in_channels))
 
         self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
-                                            activation)
+                                            activation(in_channels))
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
                                                             depthwise = depthwise),
-                                      activation) for dilation in dilations]
+                                      activation(in_channels)) for dilation in dilations]
         
         self.layers = torch.nn.ModuleList(layers)
 
