@@ -1,7 +1,5 @@
 ## Introduction
 
-(Note: I'm currently taking a break from this project to work on some self-supervised learning and neuroevolution projects. I'll probably resume later)
-
 This is a repo for audio generation models, in particular VAEs and VQ-VAEs. While it's very functional, this repository is still very much under active development.
 
 If you are interested in a general implementation of Soundstream or a neural audio codec, you should probably check out lucidrain's [implementation](https://github.com/lucidrains/audiolm-pytorch) or Facebook/Meta's [encodec](https://github.com/facebookresearch/encodec). While I used ideas from neural audio codecs, this repository also contains my experiments with audio generation, so it's not a faithful implementation of Soundstream, encodec etc. Examples are:
@@ -36,7 +34,7 @@ See environment.yml for the package details. It's probably better as a guideline
 
 ## The Generative Model
 
-The current state of the model is heavily based on [Soundstream](https://arxiv.org/pdf/2107.03312.pdf), a vector-quantized variational autoencoder (VQ-VAE). This uses a fully convolutional encoder, a residual vector quantization layer, and a fully (transposed) convolutional decoder. If you want to run this model, see the training.py file, which contains everything needed to train it on a dataset.
+The current state of the model is heavily based on [Soundstream](https://arxiv.org/pdf/2107.03312.pdf), a vector-quantized variational autoencoder (VQ-VAE). Additionally, I've updated it based on features from the [Encodec paper](https://arxiv.org/pdf/2210.13438.pdf) and [High-Fidelity Audio Compression with Improved RVQGAN paper](https://arxiv.org/pdf/2306.06546.pdf). This uses a fully convolutional encoder, a residual vector quantization layer, and a fully (transposed) convolutional decoder. If you want to run this model, see the training.py file, which contains everything needed to train it on a dataset.
 
 The advantage of fully convolutional encoders and decoders is that they allow arbitrary input length. Residual vector quantization involves quantizing a signal, subtracting the quantized signal from the original, and iteratively quantizing the residual from that repeating the process. It's advantageous here because it can enable the quantizer to capture a huge permutation of "symbols" without using a similarly huge codebook.
 
