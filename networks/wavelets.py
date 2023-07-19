@@ -4,91 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from math import ceil, sqrt
 
-class WaveletLayer(torch.nn.Module):
-    """A layer that uses convolutions to project an input to a wavelet frequency basis, generating wavelets.
-    Then, it uses a convolution to modify the output wavelet.
-    
-    Parameters
-    ----------
-    in_channels : int
-        Number of input channels.
-    hidden_channels : int
-        Number of hidden channels.
-    out_channels : int
-        Number of output channels, defaults to in_channels.
-    wavelet_kernel_size : int
-        Size of the wavelet kernel.
-    out_conv_kernel_size : int
-        Size of the output convolution kernel.
-    scale_factor : int
-        The scale factor of the wavelet. The wavelet will be scaled by this factor.
-    n_points : int
-       The number of points used for the wavelet. Must be divisible by scale_factor.
-    interval : tuple
-        The interval over which the wavelet is defined. 
-    """
-    def __init__(self,
-                 in_channels,
-                 hidden_channels,
-                 out_channels = None,
-                 wavelet_kernel_size = 7,
-                 out_conv_kernel_size = 7,
-                 scale_factor = 2,
-                 n_points = 16,
-                 interval = (-2, 2),):
-        
-        super().__init__()
-        assert n_points % scale_factor == 0, "n_points must be divisible by scale_factor"
 
-        self.in_channels = in_channels
-        if out_channels is None:
-            out_channels = in_channels
-        self.out_channels = out_channels
-
-        self.wavelet_kernel_size = wavelet_kernel_size
-        self.out_conv_kernel_size = out_conv_kernel_size
-
-        self.n_points = n_points
-        self.scale_factor = scale_factor
-        self.fold_dim = self.n_points // self.scale_factor
-
-        self.hidden_channels = hidden_channels
-
-        self.conv_in = torch.nn.Conv1d(self.in_channels, 
-                                       self.hidden_channels, 
-                                       self.wavelet_kernel_size, 
-                                       padding = "same")
-
-        self.conv_out = torch.nn.Conv1d(self.hidden_channels, 
-                                        self.out_channels, 
-                                        self.out_conv_kernel_size, 
-                                        padding = "same")
-
-        space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
-        # the spatial extent of the wavelet is constant, so we can precompute it
-        self.register_buffer("wavelet_kernel", torch.cos(space) * torch.exp((-space**2)))
-
-    def forward(self, x):
-        # this conv converts the input to frequency space
-        x = self.conv_in(x).unsqueeze(-1)
-
-        # multiply conv by wavelet kernel (shape is (batch, channels, length, space))
-        y = self.wavelet_kernel * torch.abs(x)
-        
-        # blend wavelet space and length
-        y = einops.rearrange(y, "b c l s -> b c (l s)") 
-        expected_length = y.shape[-1] // self.fold_dim
-        y_out = y.unfold(-1, self.n_points, self.fold_dim).sum(dim = -1)
-
-        # unfortunately have to do some annoying padding
-        size_diff = y_out.shape[-1] - expected_length
-        if size_diff < 0:
-            y_out = torch.cat([y_out, y[..., size_diff:]], dim = -1)
-        
-        y_out = self.conv_out(y_out)
-        return y_out
-
-    
 def causal_functional_conv1d(x, 
                              weight, 
                              bias = None, 
@@ -203,7 +119,106 @@ class MultiresScaleBlock(torch.nn.Module):
         x = torch.nn.functional.interpolate(x, scale_factor = self.scale_factor)
         x = self.conv(x)
         return self.activation(x)
+
+class WaveletLayer(torch.nn.Module):
+    """A layer that uses convolutions to project an input to a wavelet frequency basis, generating wavelets.
+    Then, it uses a convolution to modify the output wavelet.
     
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    hidden_channels : int
+        Number of hidden channels.
+    out_channels : int
+        Number of output channels, defaults to in_channels.
+    wavelet_kernel_size : int
+        Size of the wavelet kernel.
+    out_conv_kernel_size : int
+        Size of the output convolution kernel.
+    scale_factor : int
+        The scale factor of the wavelet. The wavelet will be scaled by this factor.
+    n_points : int
+       The number of points used for the wavelet. Must be divisible by scale_factor.
+    interval : tuple
+        The interval over which the wavelet is defined. 
+    """
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels = None,
+                 wavelet_kernel_size = 7,
+                 out_conv_kernel_size = 7,
+                 scale_factor = 2,
+                 n_points = 16,
+                 interval = (-10, 10),
+                 wavelet_scale = 40, # this qualitatively balances wave and particle like properties
+                 multires_depth = 0,
+                 ):
+        
+        super().__init__()
+        assert n_points % scale_factor == 0, "n_points must be divisible by scale_factor"
+
+        self.in_channels = in_channels
+        if out_channels is None:
+            out_channels = in_channels
+        self.out_channels = out_channels
+
+        self.wavelet_kernel_size = wavelet_kernel_size
+        self.out_conv_kernel_size = out_conv_kernel_size
+
+        self.n_points = n_points
+        self.scale_factor = scale_factor
+        self.fold_dim = self.n_points // self.scale_factor
+
+        self.hidden_channels = hidden_channels
+
+        if multires_depth > 0:
+            self.multires = True
+            self.multires_block = CausalMultiresConv1d(self.hidden_channels,
+                                                kernel_size = self.wavelet_kernel_size,
+                                                depth = multires_depth)
+        else:
+            self.multires = False
+        
+        self.conv_in = torch.nn.Conv1d(self.in_channels, 
+                                        self.hidden_channels, 
+                                        self.wavelet_kernel_size, 
+                                        padding = "same")
+
+        self.conv_out = torch.nn.Conv1d(self.hidden_channels, 
+                                        self.out_channels, 
+                                        self.out_conv_kernel_size, 
+                                        padding = "same")
+
+        space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
+        # the spatial extent of the wavelet is constant, so we can precompute it
+        self.register_buffer("wavelet_kernel", torch.cos(space) * torch.exp(-(space**2) / wavelet_scale))
+
+    def forward(self, x):
+        # this conv converts the input to frequency space
+        x = self.conv_in(x).unsqueeze(-1)
+
+        if self.multires:
+            x = self.multires_block(x)
+
+        # multiply conv by wavelet kernel (shape is (batch, channels, length, space))
+        y = self.wavelet_kernel * torch.abs(x)
+        
+        # blend wavelet space and length
+        y = einops.rearrange(y, "b c l s -> b c (l s)") 
+        expected_length = y.shape[-1] // self.fold_dim
+        y_out = y.unfold(-1, self.n_points, self.fold_dim).sum(dim = -1)
+
+        # unfortunately have to do some annoying padding
+        size_diff = y_out.shape[-1] - expected_length
+        if size_diff < 0:
+            y_out = torch.cat([y_out, y[..., size_diff:]], dim = -1)
+        
+        y_out = self.conv_out(y_out)
+        return y_out
+
+
 def test_wavelet(test_iterations = 1000, scale_factor = 2, plot_losses = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

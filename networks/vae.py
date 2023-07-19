@@ -133,16 +133,17 @@ class CausalDecoderBlock(torch.nn.Module):
                  activation = torch.nn.LeakyReLU(negative_slope=0.3),
                  depthwise = False,
                  wavelet = False,
-                 wavelet_hidden_ratio = 1):
+                 wavelet_hidden_ratio = 2):
         super().__init__()
         self.wavelet = wavelet
 
         dilations = [3**i for i in range(n_layers - 1)]
         if self.wavelet:
             self.wavelet = torch.nn.Sequential(WaveletLayer(in_channels, 
-                                                            out_channels * wavelet_hidden_ratio,
+                                                            out_channels * wavelet_hidden_ratio, # hidden channels
                                                             out_channels = out_channels, 
                                                             scale_factor = stride,
+                                                            wavelet_kernel_size = 2 * stride + 1,
                                                             n_points = 2 * stride * wavelet_hidden_ratio),
                                                activation)
 
@@ -187,7 +188,7 @@ class CausalVQAE(torch.nn.Module):
                  context_length = None, # input length divided by downsample factor (320 for default config)
                  use_som = True,
                  multires_skip_conn = False,
-                 wavelet_decoders = [False, True, False, False],
+                 wavelet_decoders = [True, True, False, False],
                  ):
         
         super().__init__()

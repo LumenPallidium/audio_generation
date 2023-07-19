@@ -485,16 +485,16 @@ class Trainer():
     def sample_data(self):
         i = np.random.randint(0, len(self.dataset))
         x = self.dataset[i]
-        x = utils.collator([x], resampler=self.resampler)[0]
+        x = utils.collator([x], size = 72000 * 5, resampler=self.resampler)[0]
         x = x.to(self.device).unsqueeze(0)
 
         model.eval()
         with torch.no_grad():
-          y, _, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
+          y, _, _ = model(x, codebook_n = model.quantizer.num_quantizers)
 
         # switch back to train mode
         model.train()
-        Audio(y[0].detach().cpu().numpy(), rate = self.sample_rate)
+        return y[0].detach().cpu().numpy()
 
     def train_new_quantizer(self, 
                             new_quantizer, 
@@ -525,6 +525,13 @@ class Trainer():
 #TODO : clean up discriminator set up - maybe make it default?
 #TODO : maybe look into loss balancer like encodec uses
 #TODO : make discriminator energy calcs a method or something
+#TODO : convert discriminator back to complex
+#TODO: replace relu with snake activation
+#TODO : codebook normalization L2
+#TODO : look into codebook factorization
+#TODO: ensure that frequency domain loss matches new paper
+#TODO: try new paper loss weighting
+
 if __name__ == "__main__":
     config = yaml.safe_load(open("../config/training.yml", "r"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
