@@ -40,7 +40,7 @@ class SOMGrid(torch.nn.Module):
                  width,
                  neighbor_distance = 1,
                  kernel_type = "hard",
-                 time_constant = 0.0001,
+                 time_constant = 0.00005,
                  normalize = False,):
         super().__init__()
         self.height = height
@@ -76,7 +76,10 @@ class SOMGrid(torch.nn.Module):
             kernel_init = torch.outer(kernel_init, kernel_init)
 
         elif kernel_type == "hard":
-            kernel_init = torch.ones(self.kernel_size)
+            if isinstance(self.kernel_size, int):
+                kernel_size = (self.kernel_size, self.kernel_size)
+            kernel_init = torch.ones(*kernel_size)
+        #TODO : other kernel types may be interesting - eg triangular
         else:
             raise ValueError("kernel_type must be gaussian or hard")
         
@@ -98,7 +101,6 @@ class SOMGrid(torch.nn.Module):
             kernel = kernel / kernel.sum()
 
         self.kernel = kernel
-
 
     def forward(self, cb_onehot, update_t = True):
         _, dim, _ = cb_onehot.shape

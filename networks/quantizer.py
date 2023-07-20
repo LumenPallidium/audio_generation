@@ -9,8 +9,6 @@ from utils import tuple_checker, approximate_square_root
 # https://arxiv.org/pdf/1711.00937.pdf
 
 # TODO : Add support for different types of quantizers, e.g. Gumbel-Softmax, etc.
-# TODO : maybe add a repulsion term to make the codebook vectors fill the data manifold better
-
 
 class BaseQuantizer(torch.nn.Module):
     """Base class for quantizers.
@@ -20,6 +18,24 @@ class BaseQuantizer(torch.nn.Module):
         Dimension of the input.
     codebook_size : int
         Number of entries in the codebook.
+    cut_freq : int
+        The cutoff frequency for removing codebook vectors and replacing with inputs.
+    alpha : float
+        The EMA decay rate for the codebook frequency.
+    replace_with_obs : bool
+        Whether to replace codebook entries with observations.
+    init_scale : float
+        The scale of the initial codebook. Does not apply to cosine distance.
+    new_code_noise : float
+        The amount of noise to add to new codebook entries when the stale entries outnumber replacements.
+    use_som : bool
+        Whether to use a SOM in the codebook update.
+    som_neighbor_distance : int
+        The distance for neighbors in the SOM update.
+    dist_type : str
+        The distance type to use for the codebook. Either "cos" or "euclidean".
+    in_rvq : bool
+        Whether this quantizer is in an RVQ. Used to avoid some redundancies.
     """
     def __init__(self, 
                  dim : int, 
@@ -31,7 +47,10 @@ class BaseQuantizer(torch.nn.Module):
                  new_code_noise : float = 1e-9,
                  use_som : bool = False,
                  som_neighbor_distance : int = 6,
-                 dist_type : str = "cos",):
+                 som_kernel_type = "hard",
+                 dist_type : str = "cos",
+                 in_rvq : bool = False,
+                 precreated_som : torch.nn.Module = None,):
         super().__init__()
         self.dim = dim
         self.codebook_size = codebook_size
@@ -42,6 +61,7 @@ class BaseQuantizer(torch.nn.Module):
         self.use_som = use_som
         self.ema = False # flag for the occaisonal conditional update
         self.dist_type = dist_type
+        self.in_rvq = in_rvq
 
         self.stale_clusters = None
 
@@ -55,10 +75,13 @@ class BaseQuantizer(torch.nn.Module):
         self.register_buffer("cluster_frequency", torch.ones(codebook_size))
 
         if self.use_som:
-            h, w = approximate_square_root(self.codebook_size)
-            self.som = SOMGrid(h, w,
-                               kernel_type = "gaussian",
-                               neighbor_distance = som_neighbor_distance,)
+            if in_rvq and precreated_som is not None:
+                self.som = precreated_som
+            else:
+                h, w = approximate_square_root(self.codebook_size)
+                self.som = SOMGrid(h, w,
+                                   kernel_type = som_kernel_type,
+                                   neighbor_distance = som_neighbor_distance,)
 
     def codebook_euclidean_d(self, x_flat):
 
@@ -97,9 +120,12 @@ class BaseQuantizer(torch.nn.Module):
     def codebook_update_function(self, x, x_quantized, codebook_index, x_flat, codebook_onehot):
         """Default way to update the codebook is by gradient descent on a codebook loss. Accepts extra arguments for
         other types of quantizers that may need them."""
+        
+        # normalize the codebook
+        if self.dist_type == "cos":
+            self.codebook.data = F.normalize(self.codebook.data, dim = 0)
         # codebook loss, must stop/detach the gradient of the non-quantized input
         codebook_loss = (x_quantized - x.detach()).pow(2).mean()
-        
         return codebook_loss
     
     def update_codebook_count(self, codebook_index, x_flat, verbose = False, update_codebook = True):
@@ -191,20 +217,24 @@ class BaseQuantizer(torch.nn.Module):
         k-means for the EMAQuantizer) regardless of this flag."""
         x = x_in.clone()
         if self.dist_type == "cos":
-            x = F.normalize(x, dim = -1)
+            # normalize and save magnitude to restore later
+            x_mag = torch.linalg.vector_norm(x.detach(), dim = -1, keepdim = True)
+            x = x / x_mag
+        else:
+            x_mag = 1
         codebook_index, x_flat = self.quantize(x)
-        x_quantized = self.dequantize(codebook_index)
+        x_quantized = self.dequantize(codebook_index) * x_mag
 
         # the commitment loss, stop/detach the gradient of the quantized input
-        inner_loss = (x_quantized.detach() - x).pow(2).mean()
+        inner_loss = (x_quantized.detach() - x_in).pow(2).mean()
         if self.training:
             codebook_onehot = self.update_codebook_count(codebook_index, x_flat, update_codebook = update_codebook)
-            codebook_loss = self.codebook_update_function(x, x_quantized, codebook_index, x_flat, codebook_onehot)
+            codebook_loss = self.codebook_update_function(x_in, x_quantized, codebook_index, x_flat, codebook_onehot)
             if codebook_loss is not None:
                 inner_loss += codebook_loss
 
         # passes the gradient through the quantization for the reconstruction loss
-        x_quantized = x + (x_quantized - x).detach()
+        x_quantized = x_in + (x_quantized - x_in).detach()
 
         return x_quantized, codebook_index, inner_loss
     
@@ -229,7 +259,25 @@ class EMAQuantizer(BaseQuantizer):
     codebook_size : int
         Number of entries in the codebook.
     alpha : float
-        The exponential moving average coefficient.
+        The EMA decay rate for the codebook frequency.
+    eps : float
+        The epsilon value for divisions where the denominator may be zero.
+    cut_freq : int
+        The cutoff frequency for removing codebook vectors and replacing with inputs.
+    replace_with_obs : bool
+        Whether to replace codebook entries with observations.
+    init_scale : float
+        The scale of the initial codebook. Does not apply to cosine distance.
+    new_code_noise : float
+        The amount of noise to add to new codebook entries when the stale entries outnumber replacements.
+    use_som : bool
+        Whether to use a SOM in the codebook update.
+    som_neighbor_distance : int
+        The distance for neighbors in the SOM update.
+    dist_type : str
+        The distance type to use for the codebook. Either "cos" or "euclidean".
+    in_rvq : bool
+        Whether this quantizer is in an RVQ. Used to avoid some redundancies.
     """
     def __init__(self, 
                  dim : int, 
@@ -240,7 +288,11 @@ class EMAQuantizer(BaseQuantizer):
                  replace_with_obs : bool = True,
                  init_scale : float = 1.0,
                  use_som : bool = True,
-                 som_neighbor_distance : int = 6,):
+                 som_neighbor_distance : int = 6,
+                 som_kernel_type = "hard",
+                 dist_type : str = "cos",
+                 in_rvq : bool = False,
+                 precreated_som : torch.nn.Module = None,):
         super().__init__(dim, 
                          codebook_size, 
                          alpha = alpha, 
@@ -248,10 +300,14 @@ class EMAQuantizer(BaseQuantizer):
                          replace_with_obs = replace_with_obs,
                          init_scale = init_scale,
                          use_som = use_som,
-                         som_neighbor_distance = som_neighbor_distance)
+                         som_neighbor_distance = som_neighbor_distance,
+                         som_kernel_type = som_kernel_type,
+                         dist_type = dist_type,
+                         in_rvq = in_rvq,
+                         precreated_som = precreated_som)
         
         self.eps = eps
-        self.ema = True
+        self.ema = True # helper bool
 
         # disable grad for the codebook
         self.codebook.requires_grad = False
@@ -280,6 +336,10 @@ class EMAQuantizer(BaseQuantizer):
 
             # overwrite codebook
             self.codebook.data.copy_(codebook_normalized)
+
+            if self.dist_type == "cos":
+                self.codebook.data = F.normalize(self.codebook.data, dim = 0)
+                self.ema_codebook.data = F.normalize(self.ema_codebook.data, dim = 0)
     
 
 class ResidualQuantizer(torch.nn.Module):
@@ -296,7 +356,10 @@ class ResidualQuantizer(torch.nn.Module):
                  scale_factor = 4.0,
                  priority_n = 24,
                  vq_cutoff_freq = 1,
-                 use_som = True,):
+                 use_som = True,
+                 som_kernel_type = "hard",
+                 som_neighbor_distance = 6,
+                 dist_type = "cos"):
         
         super().__init__()
 
@@ -305,6 +368,7 @@ class ResidualQuantizer(torch.nn.Module):
         self.codebook_sizes = tuple_checker(codebook_sizes, num_quantizers)
         self.priority_n = priority_n
         self.use_som = use_som
+        self.dist_type = dist_type
 
         # residual gets smaller at each step, so can be helpful to have small quantizer vectors
         scale_factors = [1 / (scale_factor ** i) for i in range(num_quantizers)]
@@ -312,11 +376,20 @@ class ResidualQuantizer(torch.nn.Module):
         quantizer_type = EMAQuantizer if quantizer_class == "ema" else BaseQuantizer
         print(f"Initializing residual quantizer with class {quantizer_class}")
 
+        if self.use_som:
+            h, w = approximate_square_root(self.codebook_sizes[0])
+            self.som = SOMGrid(h, w,
+                               kernel_type = som_kernel_type,
+                               neighbor_distance = som_neighbor_distance)
+
         quantizers = [quantizer_type(self.dim, 
                                      codebook_size, 
                                      init_scale = scale,
                                      cut_freq = vq_cutoff_freq,
-                                     use_som = use_som) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
+                                     use_som = use_som,
+                                     dist_type = dist_type,
+                                     in_rvq = True,
+                                     precreated_som = self.som) for codebook_size, scale in zip(self.codebook_sizes, scale_factors)]
 
         self.quantizers = torch.nn.ModuleList(quantizers)
 
@@ -338,9 +411,10 @@ class ResidualQuantizer(torch.nn.Module):
         indices = []
 
         for i in range(n):
+
             x_i, index, inner_loss_i = self.quantizers[i](residual, update_codebook = update_codebook)
 
-            if (i > 0) and (decorr_loss_weight > 0):
+            if (decorr_loss_weight > 0) and (i > 0):
                 # loss term to encourage decorrelation between quantizers
                 decorr_loss = decorr_loss_weight * torch.nn.functional.cosine_similarity(x_i, prev_x_i, dim = -1).mean()
                 decorr_loss /= (self.num_quantizers - 1)
@@ -435,15 +509,19 @@ if __name__ == "__main__":
     patch_size = 4
     patch_dim = patch_size**2 * 3
     embed_dim = patch_dim // 5 # 5x compression 
+    conv_embed_dim = 64
     n_patches = (h // patch_size) * (w // patch_size)
     batch_size = 32
     test_base = False
     residual = True
+    som_neighbor_distance = 2
+    som_kernel = "hard"
+    dist_type = "cos"
     residual_count = 6
     codebook_size = 128
 
     # training params
-    n_epochs = 10
+    n_epochs = 5
     lr = 1e-3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -464,26 +542,38 @@ if __name__ == "__main__":
         torch.nn.Linear(embed_dim, embed_dim)).to(device)
     patch_deembedder = torch.nn.Sequential(
         torch.nn.Linear(embed_dim, embed_dim),
-        torch.nn.LayerNorm(embed_dim),
         torch.nn.ReLU(),
         torch.nn.Linear(embed_dim, patch_dim)).to(device)
+    
 
     # test the quantizers
-    if test_base:
-        if residual:
-            quantizer = ResidualQuantizer(residual_count, embed_dim, codebook_size, quantizer_class = "base")
-        else:
-            quantizer = BaseQuantizer(embed_dim, codebook_size)
-        chainz = chain(quantizer.parameters(),
-                       patch_embedder.parameters(),
-                       patch_deembedder.parameters())
+    if residual:
+        quantizer = ResidualQuantizer(residual_count, 
+                                        embed_dim, 
+                                        codebook_size, 
+                                        quantizer_class = "base" if test_base else "ema",
+                                        dist_type = dist_type,
+                                        som_neighbor_distance = som_neighbor_distance,
+                                        som_kernel_type = som_kernel)
+    elif test_base:
+        quantizer = BaseQuantizer(embed_dim, 
+                                      codebook_size,
+                                      dist_type = dist_type)
+
     else:
-        if residual:
-            quantizer = ResidualQuantizer(residual_count, embed_dim, codebook_size, quantizer_class = "ema")
-        else:
-            quantizer = EMAQuantizer(embed_dim, codebook_size, use_som = True, som_neighbor_distance = 7,)
+        quantizer = EMAQuantizer(embed_dim, 
+                                    codebook_size, 
+                                    use_som = True,
+                                    dist_type = dist_type, 
+                                    som_neighbor_distance = som_neighbor_distance,
+                                    som_kernel_type = som_kernel)
+    if test_base:
         chainz = chain(patch_embedder.parameters(),
-                       patch_deembedder.parameters())
+                       patch_deembedder.parameters(),
+                       quantizer.parameters())
+    else:
+        chainz = chain(patch_embedder.parameters(),
+                       patch_deembedder.parameters(),)
         
     quantizer.to(device)
 
@@ -546,4 +636,4 @@ if __name__ == "__main__":
                     plot_som_codebook(f"tmp/codebook_epoch_{epoch}_{str_i}", quantizer, patch_deembedder, patch_size = patch_size)
         quantizer.update_cutoff(ratio = 2/3)
         print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
-    plt.plot(losses)
+    plt.plot(np.log(losses[2000:]), label = "log loss")

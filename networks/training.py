@@ -527,6 +527,7 @@ class Trainer():
 #TODO : make discriminator energy calcs a method or something
 #TODO : convert discriminator back to complex
 #TODO : look into codebook factorization
+#TODO : look into adding torch.jit for speed up
 
 if __name__ == "__main__":
     config = yaml.safe_load(open("../config/training.yml", "r"))
