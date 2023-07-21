@@ -39,6 +39,7 @@ def add_util_norm(module, norm = "weight", **norm_kwargs):
         norm_f = lambda x: x
     return norm_f(module, **norm_kwargs)
 
+@torch.jit.script
 def snake_activation(x, alpha, eps = 1e-6):
     """A 'snake' activation function, as first described in:
     https://arxiv.org/pdf/2206.04658.pdf
@@ -52,6 +53,7 @@ def snake_activation(x, alpha, eps = 1e-6):
     alpha : torch.Tensor
         The alpha parameter, which can be learnable..
     """
+    # type: (Tensor, Tensor, float) -> Tensor
     return x + (1 / (alpha + eps)) * (torch.sin(alpha * x) ** 2)
 
 class Snek(torch.nn.Module):

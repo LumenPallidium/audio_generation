@@ -108,7 +108,6 @@ class Trainer():
                  steps_per_epoch = None,
                  batch_size = 8,
                  spec_windows = [2 ** i for i in range(5, 12)],
-                 spec_bins = [5 * (2 ** i) for i in range(0, 7)],
                  save_every = 5,
                  # these are based on experiments
                  spec_loss_weight = 0.01,
@@ -118,7 +117,7 @@ class Trainer():
                  noise_aug_scale = 0.01,
                  cutoff_scale_per_epoch = 0.95,
                  accumulation_steps = 8,
-                 frequency_filter = 4000, # human voice tends to max at 5k Hz
+                 frequency_filter = 6000, # human voice tends to max at 5k Hz
                  codebook_frequency_scale = 0.05, # force deeper entries to hear higher frequencies
                  ):
         
@@ -152,8 +151,8 @@ class Trainer():
                                                         n_fft = max(window, 512),
                                                         win_length = window,
                                                         hop_length = window // 4,
-                                                        n_mels = spec_bin,
-                                                        normalized = True).to(self.device) for spec_bin, window in zip(spec_bins, spec_windows)]
+                                                        n_mels = 64,
+                                                        normalized = True).to(self.device) for window in spec_windows]
         self.spec_loss_weight = spec_loss_weight
         self.reconstruction_loss_weight = reconstruction_loss_weight
         self.generator_loss_weight = generator_loss_weight

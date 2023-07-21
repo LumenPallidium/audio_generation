@@ -78,7 +78,7 @@ class CausalResidualBlock1d(torch.nn.Module):
                  kernel_size = 7, 
                  dilation=1, 
                  bias=True, 
-                 activation=Snek,
+                 activation=torch.nn.LeakyReLU(0.1),
                  dropout = 0.0,
                  depthwise = False):
         super().__init__()
@@ -89,7 +89,7 @@ class CausalResidualBlock1d(torch.nn.Module):
             self.conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation=dilation, bias=bias)
 
         self.conv2 = CausalConv1d(out_channels, out_channels, 1, bias=bias)
-        self.activation = activation(out_channels)
+        self.activation = activation
         self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, x):
@@ -104,7 +104,7 @@ class CausalEncoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = Snek,
+                 activation = torch.nn.LeakyReLU(0.1),
                  depthwise = False):
         super().__init__()
         dilations = [3**i for i in range(n_layers - 1)]
@@ -113,9 +113,11 @@ class CausalEncoderBlock(torch.nn.Module):
                                                             in_channels, 
                                                             dilation=dilation,
                                                             depthwise = depthwise),
-                                      activation(in_channels)) for dilation in dilations]
+                                      activation
+                                      ) for dilation in dilations]
         layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
-                                          activation(out_channels)))
+                                          activation,
+                                          ))
 
         self.layers = torch.nn.ModuleList(layers)
 
@@ -130,38 +132,41 @@ class CausalDecoderBlock(torch.nn.Module):
                  out_channels,
                  stride,
                  n_layers = 4,
-                 activation = Snek,
+                 activation = torch.nn.LeakyReLU(0.1),
                  depthwise = False,
                  wavelet = False,
-                 wavelet_hidden_ratio = 2):
+                 wavelet_hidden_ratio = 4):
         super().__init__()
         self.wavelet = wavelet
 
         dilations = [3**i for i in range(n_layers - 1)]
         if self.wavelet:
-            self.wavelet = torch.nn.Sequential(WaveletLayer(in_channels, 
+            self.in_conv = torch.nn.Sequential(WaveletLayer(in_channels, 
                                                             out_channels * wavelet_hidden_ratio, # hidden channels
                                                             out_channels = out_channels, 
                                                             scale_factor = stride,
                                                             wavelet_kernel_size = 2 * stride + 1,
                                                             n_points = 2 * stride * wavelet_hidden_ratio),
-                                               activation(out_channels))
-
-        self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, out_channels, 2 * stride, stride = stride),
-                                            activation(out_channels))
+                                               activation,
+                                               )
+        else:
+            self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, 
+                                                             out_channels, 
+                                                             2 * stride, 
+                                                             stride = stride),
+                                                activation,
+                                                )
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
                                                             depthwise = depthwise),
-                                      activation(out_channels)) for dilation in dilations]
+                                      activation,
+                                      ) for dilation in dilations]
         
         self.layers = torch.nn.ModuleList(layers)
 
     def forward(self, x):
-        if self.wavelet:
-            x = self.in_conv(x) + self.wavelet(x)
-        else:
-            x = self.in_conv(x)
+        x = self.in_conv(x)
 
         for layer in self.layers:
             x = layer(x)
@@ -188,7 +193,7 @@ class CausalVQAE(torch.nn.Module):
                  context_length = None, # input length divided by downsample factor (320 for default config)
                  use_som = True,
                  multires_skip_conn = False,
-                 wavelet_decoders = [True, True, False, False],
+                 wavelet_decoders = [False, True, False, False],
                  ):
         
         super().__init__()

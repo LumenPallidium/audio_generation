@@ -38,9 +38,9 @@ class SOMGrid(torch.nn.Module):
     def __init__(self, 
                  height,
                  width,
-                 neighbor_distance = 1,
-                 kernel_type = "hard",
-                 time_constant = 0.00005,
+                 neighbor_distance = 6,
+                 kernel_type = "gaussian",
+                 time_constant = 0.0005,
                  normalize = False,):
         super().__init__()
         self.height = height
@@ -88,6 +88,7 @@ class SOMGrid(torch.nn.Module):
         
         self.register_buffer("kernel_init", kernel_init)
         self.register_buffer("kernel", kernel_init)
+        
 
     def update_t(self):
         self.t += 1

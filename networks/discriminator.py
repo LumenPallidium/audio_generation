@@ -16,7 +16,7 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
                  kernel_sizes = [15, 41, 41, 41, 41, 5, 3],
                  strides = [1, 4, 4, 4, 4, 1, 1],
                  groups = [1, 4, 16, 64, 256, 1, 1],
-                 activation = Snek,
+                 activation = torch.nn.LeakyReLU(0.2),
                  scale = 1,
                  norm = "spectral"):
         super().__init__()
@@ -33,7 +33,7 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
                                                       kernel_sizes[i], stride = strides[i], 
                                                       groups = groups[i]),
                                                       norm = norm),
-                                      activation(self.channel_sizes[i + 1])) for i in range(n_steps - 1)]
+                                      activation) for i in range(n_steps - 1)]
         
         # last layer does not have activation
         layers.append(add_util_norm(torch.nn.Conv1d(channel_sizes[-1], 1, kernel_sizes[-1], stride = strides[-1], groups = groups[-1]),
@@ -84,7 +84,7 @@ class STFTDiscriminatorBlock(torch.nn.Module):
                  stride,
                  kernel_size = None,
                  padding = None,
-                 activation = Snek,
+                 activation = torch.nn.LeakyReLU(0.2),
                  norm = "spectral"):
         
         super().__init__()
@@ -99,7 +99,7 @@ class STFTDiscriminatorBlock(torch.nn.Module):
                                                                         kernel_size = 3,
                                                                         padding = 1),
                                                         norm = norm),
-                                           activation(in_channels, dim = 2),
+                                           activation,
                                            add_util_norm(torch.nn.Conv2d(in_channels, 
                                                                          in_channels * channel_multiplier, 
                                                                          stride = stride, 

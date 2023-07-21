@@ -147,8 +147,8 @@ class WaveletLayer(torch.nn.Module):
                  in_channels,
                  hidden_channels,
                  out_channels = None,
-                 wavelet_kernel_size = 7,
-                 out_conv_kernel_size = 7,
+                 wavelet_kernel_size = 13,
+                 out_conv_kernel_size = 3,
                  scale_factor = 2,
                  n_points = 16,
                  interval = (-10, 10),
@@ -217,13 +217,31 @@ class WaveletLayer(torch.nn.Module):
         
         y_out = self.conv_out(y_out)
         return y_out
+    
+    def export_in_conv_image(self, path):
+        """Exports an image of the in convolution kernel"""
+        kernel = self.conv_in.weight
+        kernel = kernel.view(-1, kernel.shape[-1]).detach().cpu().numpy()
+        plt.imshow(kernel, cmap = "seismic")
+        plt.savefig(path)
+        plt.close()
 
 
-def test_wavelet(test_iterations = 1000, scale_factor = 2, plot_losses = False):
+def test_wavelet(test_iterations = 1000, 
+                 scale_factor = 2, 
+                 plot_losses = False,
+                 kernel_size = 51,
+                 hidden_channels = 32):
+    import os
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    waver = WaveletLayer(1, 2, scale_factor = scale_factor).to(device)
+    waver = WaveletLayer(1, 
+                         hidden_channels,
+                         wavelet_kernel_size = kernel_size,
+                         scale_factor = scale_factor).to(device)
     optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
+    os.makedirs("tmp", exist_ok = True)
+    waver.export_in_conv_image("tmp/in_conv_start.png")
 
     om = torchaudio.load(r"om.wav")[0]
     om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
@@ -255,6 +273,8 @@ def test_wavelet(test_iterations = 1000, scale_factor = 2, plot_losses = False):
         ax.plot(x_hats[-1], label = "reconstructed")
         ax.plot(om.squeeze().squeeze().detach().cpu().numpy(), label = "original")
     plt.show()
+
+    waver.export_in_conv_image("tmp/in_conv_end.png")
     
 
 def test_multires(test_iterations = 500, num_freqs = 6, interval = torch.arange(-1, 1, 0.01)):
