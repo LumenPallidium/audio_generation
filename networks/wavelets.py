@@ -142,6 +142,12 @@ class WaveletLayer(torch.nn.Module):
        The number of points used for the wavelet. Must be divisible by scale_factor.
     interval : tuple
         The interval over which the wavelet is defined. 
+    wavelet_scale : float
+        The scale of the wavelet. This can be learned.
+    multires_depth : int
+        The depth of the multires convolutions. If 0, no multires convolutions are used.
+    channelwise_scale : bool
+        If true, then wavelet_scale is per channel. Otherwise, it is shared across channels.
     """
     def __init__(self,
                  in_channels,
@@ -154,6 +160,7 @@ class WaveletLayer(torch.nn.Module):
                  interval = (-10, 10),
                  wavelet_scale = 40, # this qualitatively balances wave and particle like properties
                  multires_depth = 0,
+                 channelwise_scale = True,
                  ):
         
         super().__init__()
@@ -191,9 +198,17 @@ class WaveletLayer(torch.nn.Module):
                                         self.out_conv_kernel_size, 
                                         padding = "same")
 
-        space = einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n")
-        # the spatial extent of the wavelet is constant, so we can precompute it
-        self.register_buffer("wavelet_kernel", torch.cos(space) * torch.exp(-(space**2) / wavelet_scale))
+        self.register_buffer("space", 
+                             einops.rearrange(torch.linspace(*interval, n_points), "n -> 1 1 1 n"))
+
+        # learnable parameter controlling how gaussian vs wavelike the wavelet is
+        wavelet_scale = torch.tensor(wavelet_scale).float()
+        if channelwise_scale:
+            wavelet_scale = wavelet_scale.repeat(self.hidden_channels)
+            wavelet_scale = einops.rearrange(wavelet_scale, "n -> 1 n 1 1")
+        self.wavelet_scale = torch.nn.Parameter(wavelet_scale)
+        # the cos component of the wavelet is constant, so we can precompute it
+        self.register_buffer("cos_kernel", torch.cos(self.space))
 
     def forward(self, x):
         # this conv converts the input to frequency space
@@ -203,7 +218,7 @@ class WaveletLayer(torch.nn.Module):
             x = self.multires_block(x)
 
         # multiply conv by wavelet kernel (shape is (batch, channels, length, space))
-        y = self.wavelet_kernel * torch.abs(x)
+        y = self.cos_kernel * torch.exp(-(self.space**2) / self.wavelet_scale) * x
         
         # blend wavelet space and length
         y = einops.rearrange(y, "b c l s -> b c (l s)") 
@@ -227,55 +242,78 @@ class WaveletLayer(torch.nn.Module):
         plt.close()
 
 
+def simple_mixed_sin(num_freqs, interval, freq_range = 20):
+    """Generates a signal composed of mixture of sinusoids."""
+    freqs = torch.rand(num_freqs) * freq_range
+    freqs = torch.sort(freqs)[0]
+    sins = torch.sin(2 * torch.pi * freqs.unsqueeze(-1) * interval.unsqueeze(0))
+    sins = sins.sum(dim = 0, keepdim = True).unsqueeze(0)
+    return freqs, sins
+
+
 def test_wavelet(test_iterations = 1000, 
-                 scale_factor = 2, 
-                 plot_losses = False,
-                 kernel_size = 51,
-                 hidden_channels = 32):
+                 scale_factor = 8,
+                 kernel_size = 13,
+                 hidden_channels = 32,
+                 num_freqs = 20, 
+                 interval = torch.arange(-1, 1, 0.01),
+                 channelwise = True):
     import os
+    from utils import losses_to_running_loss as ltrl
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     waver = WaveletLayer(1, 
                          hidden_channels,
                          wavelet_kernel_size = kernel_size,
-                         scale_factor = scale_factor).to(device)
-    optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
+                         scale_factor = scale_factor,
+                         channelwise_scale = channelwise).to(device)
+
     os.makedirs("tmp", exist_ok = True)
     waver.export_in_conv_image("tmp/in_conv_start.png")
 
-    om = torchaudio.load(r"om.wav")[0]
-    om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
-
-    om = torch.nn.functional.interpolate(om, size = 2 ** 14)
-    x_ds = torch.nn.functional.interpolate(om, 
-                                           scale_factor = 1 / scale_factor)
-
-    fig, ax = plt.subplots()
     x_hats = []
+    losses_us = []
     losses = []
+
+    optimizer = torch.optim.Adam(waver.parameters(), lr = 1e-3)
     for i in tqdm(range(test_iterations)):
         optimizer.zero_grad()
-        noise = torch.randn_like(x_ds) * 1e-3
-        x_i = x_ds + noise
 
-        x_hat = waver(x_i)
+        _, sins = simple_mixed_sin(num_freqs, interval)
+        sins = sins.to(device)
 
-        loss = torch.nn.functional.mse_loss(x_hat, om)
+        sins_ds = torch.nn.functional.interpolate(sins, scale_factor = 1 / scale_factor)
+        # this is counterfactual to see what the loss would be with regular upsampling
+        sins_us = torch.nn.functional.interpolate(sins_ds, scale_factor = scale_factor)
+
+        x_hat = waver(sins_ds)
+
+        loss = torch.nn.functional.mse_loss(x_hat, sins)
+        loss_us = torch.nn.functional.mse_loss(sins_us, sins).detach()
+
         loss.backward()
         optimizer.step()
 
         x_hats.append(x_hat.squeeze().squeeze().detach().cpu().numpy())
         losses.append(loss.item())
+        losses_us.append(loss_us.item())
 
-    if plot_losses:
-        plt.plot(losses)
-    else:
-        ax.plot(x_hats[-1], label = "reconstructed")
-        ax.plot(om.squeeze().squeeze().detach().cpu().numpy(), label = "original")
+
+    fig, ax = plt.subplots(2, figsize = (10, 10))
+    ax[0].plot(ltrl(losses, 0.99))
+    ax[0].plot(ltrl(losses_us, 0.99), linestyle = "--")
+    ax[0].set_title("loss")
+
+    ax[1].plot(x_hats[-1], label = "reconstructed")
+    ax[1].plot(sins.squeeze().squeeze().detach().cpu().numpy(), label = "original")
+    ax[1].legend()
+    ax[1].set_title("reconstruction")
     plt.show()
 
-    waver.export_in_conv_image("tmp/in_conv_end.png")
-    
+    waver.export_in_conv_image(f"tmp/in_conv_end.png")
+    return waver
+
 
 def test_multires(test_iterations = 500, num_freqs = 6, interval = torch.arange(-1, 1, 0.01)):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -292,10 +330,7 @@ def test_multires(test_iterations = 500, num_freqs = 6, interval = torch.arange(
     for i in tqdm(range(test_iterations)):
         optimizer.zero_grad()
         # randomly sample frequencies
-        freqs = torch.rand(num_freqs) * 4
-        freqs = torch.sort(freqs)[0]
-        sins = torch.sin(2 * torch.pi * freqs.unsqueeze(-1) * interval.unsqueeze(0))
-        sins = sins.sum(dim = 0, keepdim = True).unsqueeze(0)
+        freqs, sins = simple_mixed_sin(num_freqs, interval)
 
         x_hat = model(sins).sum(dim = (0, -1))
 
@@ -317,11 +352,11 @@ if __name__ == "__main__":
     from tqdm import tqdm
     import torchaudio
     from utils import losses_to_running_loss
-    wavelet_iters = 1000
+    wavelet_iters = 10000
     multires_iters = 0
 
     if wavelet_iters:
-        test_wavelet(test_iterations = wavelet_iters, scale_factor = 4)
+        waver = test_wavelet(test_iterations = wavelet_iters, scale_factor = 4)
 
     if multires_iters:
         test_multires(test_iterations = multires_iters)

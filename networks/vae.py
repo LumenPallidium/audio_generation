@@ -6,19 +6,13 @@ from math import ceil
 from quantizer import ResidualQuantizer, tuple_checker
 from wavelets import MultiresScaleBlock, WaveletLayer
 from utils import add_util_norm, animate_sound, Snek
-try:
-    from energy_transformer import EnergyTransformer
-    ET_AVAILABLE = True
-except ImportError:
-    ET_AVAILABLE = False
-    print("EnergyTransformer not available. See the readme if you want to install it.")
 
 # the causal convolution layers were initially modified from:
 # https://github.com/lucidrains/audiolm-pytorch/blob/main/audiolm_pytorch/soundstream.py
 # and then updated based on:
 # https://github.com/facebookresearch/encodec/blob/main/encodec/modules/conv.py
 class CausalConv1d(torch.nn.Module):
-    """A 1D convolution which masks future inputs."""
+    """A 1D convolution which preserves number of timesteps."""
     def __init__(self, 
                  in_channels, 
                  out_channels, 
@@ -49,7 +43,7 @@ class CausalConv1d(torch.nn.Module):
         return target_length - length
     
 class CausalConvT1d(torch.nn.Module):
-    """A 1D transposed convolution which masks future inputs."""
+    """A 1D transposed convolution which preserves number of timesteps."""
     def __init__(self, 
                  in_channels, 
                  out_channels, 
@@ -69,7 +63,31 @@ class CausalConvT1d(torch.nn.Module):
         pad = x.shape[-1] - self.right_pad
         return x[..., :pad]
     
-    
+class CausalUpsampleConv1d(torch.nn.Module):
+    """A 1D upsampling convolution which preserves number of timesteps.
+    Avoids "checkerboard" artifacts by upsampling before convolution."""
+    def __init__(self, 
+                 in_channels, 
+                 out_channels, 
+                 kernel_size, 
+                 stride = 1, 
+                 bias=True,
+                 norm = "weight"):
+        super().__init__()
+        self.scale_factor = stride
+        self.conv = add_util_norm(torch.nn.Conv1d(in_channels, 
+                                                  out_channels, 
+                                                  kernel_size,
+                                                  padding = "same",
+                                                  bias=bias),
+                                  norm = norm)
+
+
+    def forward(self, x):
+        x = torch.nn.functional.interpolate(x, scale_factor = self.scale_factor)
+        x = self.conv(x)
+        return x
+
 class CausalResidualBlock1d(torch.nn.Module):
     """A residual block with causal convolutions. Standard convolution followed by kernel = 1 convolution."""
     def __init__(self, 
@@ -115,7 +133,10 @@ class CausalEncoderBlock(torch.nn.Module):
                                                             depthwise = depthwise),
                                       activation
                                       ) for dilation in dilations]
-        layers.append(torch.nn.Sequential(CausalConv1d(in_channels, out_channels, 2 * stride, stride=stride),
+        layers.append(torch.nn.Sequential(CausalConv1d(in_channels, 
+                                                       out_channels, 
+                                                       2 * stride + 1, 
+                                                       stride=stride),
                                           activation,
                                           ))
 
@@ -134,28 +155,36 @@ class CausalDecoderBlock(torch.nn.Module):
                  n_layers = 4,
                  activation = torch.nn.LeakyReLU(0.1),
                  depthwise = False,
+                 upsample = True,
                  wavelet = False,
-                 wavelet_hidden_ratio = 4):
+                 wavelet_hidden_ratio = 4,
+                 channelwise = True):
         super().__init__()
         self.wavelet = wavelet
 
         dilations = [3**i for i in range(n_layers - 1)]
         if self.wavelet:
-            self.in_conv = torch.nn.Sequential(WaveletLayer(in_channels, 
-                                                            out_channels * wavelet_hidden_ratio, # hidden channels
-                                                            out_channels = out_channels, 
-                                                            scale_factor = stride,
-                                                            wavelet_kernel_size = 2 * stride + 1,
-                                                            n_points = 2 * stride * wavelet_hidden_ratio),
-                                               activation,
-                                               )
+            conv_layer = WaveletLayer(in_channels, 
+                                      out_channels * wavelet_hidden_ratio, # hidden channels
+                                      out_channels = out_channels, 
+                                      scale_factor = stride,
+                                      wavelet_kernel_size = 2 * stride + 1,
+                                      n_points = 2 * stride * wavelet_hidden_ratio,
+                                      channelwise_scale = channelwise)
+
+        elif upsample:
+            conv_layer = CausalUpsampleConv1d(in_channels,
+                                              out_channels,
+                                              2 * stride + 1,
+                                              stride = stride)
         else:
-            self.in_conv = torch.nn.Sequential(CausalConvT1d(in_channels, 
-                                                             out_channels, 
-                                                             2 * stride, 
-                                                             stride = stride),
-                                                activation,
-                                                )
+            conv_layer = CausalConvT1d(in_channels, 
+                                       out_channels, 
+                                       2 * stride + 1, 
+                                       stride = stride)
+        self.in_conv = torch.nn.Sequential(conv_layer,
+                                           activation,
+                                            )
         layers = [torch.nn.Sequential(CausalResidualBlock1d(out_channels, 
                                                             out_channels, 
                                                             dilation = dilation,
@@ -175,7 +204,7 @@ class CausalDecoderBlock(torch.nn.Module):
 class CausalVQAE(torch.nn.Module):
     def __init__(self,
                  in_channels = 1,
-                 n_blocks = 4,
+                 n_blocks = 5,
                  n_layers_per_block = 4,
                  first_block_channels = 32,
                  num_quantizers = 8,
@@ -183,17 +212,14 @@ class CausalVQAE(torch.nn.Module):
                  codebook_dim = 512,
                  vq_cutoff_freq = 1,
                  vq_type = "ema",
-                 strides = (2, 4, 5, 8),
+                 strides = (2, 3, 4, 4, 5),
                  input_format = "b l c",
                  channel_multiplier = 2,
                  norm = torch.nn.Identity,
                  depthwise = False,
-                 use_energy_transformer = False,
-                 n_heads = 8,
-                 context_length = None, # input length divided by downsample factor (320 for default config)
                  use_som = True,
-                 multires_skip_conn = False,
-                 wavelet_decoders = [False, True, False, False],
+                 som_kernel_type = "gaussian",
+                 wavelet_decoders = [False, False, True, False, False],
                  ):
         
         super().__init__()
@@ -202,8 +228,6 @@ class CausalVQAE(torch.nn.Module):
         self.n_layers_per_block = n_layers_per_block
         self.num_quantizers = num_quantizers
         self.vq_cutoff_freq = vq_cutoff_freq
-        self.use_energy_transformer = use_energy_transformer
-        self.multires_skip_conn = multires_skip_conn
 
         self.codebook_dim = codebook_dim
         self.codebook_size = tuple_checker(codebook_size, num_quantizers)
@@ -218,21 +242,13 @@ class CausalVQAE(torch.nn.Module):
         else:
             self.wavelet_decoders = [wavelet_decoders] * n_blocks
 
-        if self.use_energy_transformer:
-            assert ET_AVAILABLE, "Energy Transformer not available. Please install it by following readme instructions."
-            assert context_length is not None, "Context length must be specified when using Energy Transformer."
-            self.quantizer = EnergyTransformer(codebook_dim,
-                                               codebook_dim,
-                                               n_heads = n_heads,
-                                               context_length = context_length,
-                                               n_iters_default = num_quantizers)
-        else:
-            self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
-                                               dim = codebook_dim, 
-                                               quantizer_class = vq_type, 
-                                               codebook_sizes = codebook_size,
-                                               vq_cutoff_freq = vq_cutoff_freq,
-                                               use_som = use_som)
+        self.quantizer = ResidualQuantizer(num_quantizers = num_quantizers, 
+                                            dim = codebook_dim, 
+                                            quantizer_class = vq_type, 
+                                            codebook_sizes = codebook_size,
+                                            vq_cutoff_freq = vq_cutoff_freq,
+                                            use_som = use_som,
+                                            som_kernel_type = som_kernel_type)
 
         channel_sizes = [first_block_channels * channel_multiplier**i for i in range(n_blocks + 1)]
 
@@ -264,16 +280,6 @@ class CausalVQAE(torch.nn.Module):
         # last decoder layer
         decoders.append(CausalConv1d(first_block_channels, in_channels, 7))
 
-        if self.multires_skip_conn:
-            self.multires_encode = MultiresScaleBlock(self.in_channels,
-                                                      channel_sizes[-1],
-                                                      scale_factor = 1 / self.scale_factor,
-                                                      kernel_size = 7,)
-            self.multires_decode = MultiresScaleBlock(channel_sizes[-1],
-                                                      self.in_channels,
-                                                      scale_factor = self.scale_factor,
-                                                      kernel_size = 7,)
-
         if input_format == "b l c":
             self.rearrange_in = einops.layers.torch.Rearrange("b l c -> b c l")
             self.rearrange_out = einops.layers.torch.Rearrange("b c l -> b l c")
@@ -294,22 +300,15 @@ class CausalVQAE(torch.nn.Module):
             # each decoder takes the quantized from the previous decoder
             x = decoder(x)
 
-        if self.multires_skip_conn:
-            x = x + self.multires_decode(x_quantized)
-
         x = self.rearrange_out(x)
  
         return x, commit_loss, index
     
     def encode(self, x, update_codebook = False, codebook_n = None, prioritize_early = False):
         x = self.rearrange_in(x)
-        x_in = x
 
         for encoder in self.encoders:
             x = encoder(x)
-
-        if self.multires_skip_conn:
-            x = x + self.multires_encode(x_in)
 
         x = einops.rearrange(x, "b c l -> b l c") # maybe inefficient
 
@@ -326,16 +325,13 @@ class CausalVQAE(torch.nn.Module):
         self.to(device)
         self.eval()
         with torch.no_grad():
-            if self.use_energy_transformer:
-                x = torch.randn(1, length, self.codebook_dim).to(device) * normal_var
-                x, _, _= self.quantizer(x, n_iters = n_iters)
-            else:
-                x = 0
-                for i in range(self.num_quantizers):
-                    x_i= torch.randint(0, self.codebook_size[0],
-                                        (1, length)).to(device)
-                    x_i = self.quantizer.quantizers[i].dequantize(x_i)
-                    x += x_i
+
+            x = 0
+            for i in range(self.num_quantizers):
+                x_i= torch.randint(0, self.codebook_size[0],
+                                    (1, length)).to(device)
+                x_i = self.quantizer.quantizers[i].dequantize(x_i)
+                x += x_i
 
             x = einops.rearrange(x, "b l c -> b c l" )
 
@@ -350,16 +346,12 @@ class CausalVQAE(torch.nn.Module):
     
     def replace_quantizer(self, new_quantizer):
         self.quantizer = new_quantizer
-        if isinstance(new_quantizer, EnergyTransformer):
-            self.use_energy_transformer = True
-        else:
-            self.use_energy_transformer = False
 
     def update_cutoff(self, new_cutoff = None, ratio = None):
         self.quantizer.update_cutoff(new_cutoff = new_cutoff, ratio = ratio)
  
 
-# note with input length 72000, latent dim with default params is 225 (stride factor 320)
+# note with input length 72000, latent dim with default params is 225 (stride factor 480)
 #TODO : try varying codebooks sizes and dims
 if __name__ == "__main__":
     import os
@@ -375,8 +367,7 @@ if __name__ == "__main__":
                        num_quantizers = 8, 
                        codebook_size = 1024, 
                        input_format = "n c l",
-                       use_energy_transformer = False,
-                       vq_type = "ema")
+                       vq_type = "ema").to(device)
     
     if test_sampling:
         y = model.sample(device = device)
@@ -386,7 +377,7 @@ if __name__ == "__main__":
         om = torchaudio.load(r"om.wav")[0]
         om = om.mean(dim = 0, keepdim = True).unsqueeze(0).to(device)
 
-        # shape needs to be divisible by 320 for current architecture
+        # shape needs to be divisible by 480 for current architecture
         om = om[:, :, :65280]
 
         optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)

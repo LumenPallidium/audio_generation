@@ -48,7 +48,7 @@ class BaseQuantizer(torch.nn.Module):
                  use_som : bool = False,
                  som_neighbor_distance : int = 2,
                  som_kernel_type = "hard",
-                 dist_type : str = "cos",
+                 dist_type : str = "e",
                  in_rvq : bool = False,
                  precreated_som : torch.nn.Module = None,):
         super().__init__()
@@ -217,10 +217,10 @@ class BaseQuantizer(torch.nn.Module):
                 
             # replace the low clusters with the new clusters
             self.codebook[:, low_clusters] = high_vectors
+            # update cluster frequency
+            self.cluster_frequency[low_clusters] += 1
             if self.ema:
                 self.ema_codebook[:, low_clusters] = high_vectors
-                # update cluster frequency
-                self.cluster_frequency[low_clusters] += 1
         
 
     def forward(self, x_in, update_codebook : bool = False):
@@ -298,7 +298,7 @@ class EMAQuantizer(BaseQuantizer):
                  use_som : bool = True,
                  som_neighbor_distance : int = 2,
                  som_kernel_type = "hard",
-                 dist_type : str = "cos",
+                 dist_type : str = "e",
                  in_rvq : bool = False,
                  precreated_som : torch.nn.Module = None,):
         super().__init__(dim, 
@@ -331,7 +331,6 @@ class EMAQuantizer(BaseQuantizer):
 
         # projects the input onto the closest codebook entry, taking a mean along the batch and length
         with torch.no_grad():
-            size = x_flat.shape[0] * x_flat.shape[1]
             codebook_sum = torch.einsum("b l d, b l c -> d c", x_flat, codebook_onehot)
 
             # update ema codebook with the input vectors
@@ -359,7 +358,7 @@ class ResidualQuantizer(torch.nn.Module):
                  quantizer_class = "ema",
                  scale_factor = 4.0,
                  priority_n = 24,
-                 vq_cutoff_freq = 6,
+                 vq_cutoff_freq = 2,
                  use_som = True,
                  som_kernel_type = "hard",
                  som_neighbor_distance = 2,
@@ -385,6 +384,8 @@ class ResidualQuantizer(torch.nn.Module):
             self.som = SOMGrid(h, w,
                                kernel_type = som_kernel_type,
                                neighbor_distance = som_neighbor_distance)
+        else:
+            self.som = None
 
         quantizers = [quantizer_type(self.dim, 
                                      codebook_size, 
@@ -468,7 +469,6 @@ if __name__ == "__main__":
     from einops.layers.torch import Rearrange
     import matplotlib.pyplot as plt
     from utils import losses_to_running_loss
-
     # helpful functions
     im2tensor = torchvision.transforms.ToTensor()
 
@@ -482,7 +482,74 @@ if __name__ == "__main__":
     def save_im(x, path):
         tensor2im(x).save(path)
 
-    def plot_som_codebook(path, quantizer, deembedder, patch_size = 4):
+    def get_networks(case, patch_dim, embed_dim, device):
+        if case == "linear":
+            # feedforward layers to convert the last dim of the patched images to an embedding dimension
+            patch_embedder = torch.nn.Sequential(
+                torch.nn.Linear(patch_dim, embed_dim),
+                torch.nn.LayerNorm(embed_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(embed_dim, embed_dim)).to(device)
+            patch_deembedder = torch.nn.Sequential(
+                torch.nn.Linear(embed_dim, embed_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(embed_dim, patch_dim)).to(device)
+            
+            # these break a batch of images into patches and the converse, respectively
+            patcher = Rearrange("... c (h p1) (w p2) -> ... (h w) (p1 p2 c)", 
+                                p1 = patch_size, 
+                                p2 = patch_size).requires_grad_(False).to(device)
+
+            depatcher = Rearrange("... (h w) (p1 p2 c) -> ... c (h p1) (w p2)", 
+                                  p1 = patch_size, 
+                                  p2 = patch_size, 
+                                  h = h // patch_size, 
+                                  w = w // patch_size).requires_grad_(False).to(device)
+        elif case == "conv":
+            layers = []
+            n_steps = 3
+            curr_channel = 3
+            prev_channel = 3
+            for i in range(n_steps):
+                curr_channel = prev_channel * 4
+                layers.append(torch.nn.Conv2d(prev_channel, 
+                                              curr_channel,
+                                              kernel_size = 3,
+                                              stride = 2,
+                                              padding = 1))
+                if i < n_steps - 1:
+                    layers.append(torch.nn.ReLU())
+                prev_channel = curr_channel
+            patcher = torch.nn.Sequential(*layers).to(device)
+
+            embed_dim = curr_channel
+            layers = []
+            for i in range(n_steps):
+                curr_channel = prev_channel // 4
+                layers.append(torch.nn.Upsample(scale_factor = 2))
+                layers.append(torch.nn.Conv2d(prev_channel,
+                                              curr_channel,
+                                              kernel_size = 3,
+                                              padding = "same"))
+                
+                if i < n_steps - 1:
+                    layers.append(torch.nn.ReLU())
+                prev_channel = curr_channel
+            depatcher = torch.nn.Sequential(*layers).to(device)
+
+            patch_embedder = Rearrange("... c h w -> ... (h w) c").requires_grad_(False)
+            patch_deembedder = Rearrange("... (h w) c -> ... c h w",
+                                  h = 4,
+                                  w = 4).requires_grad_(False)
+        else:
+            raise ValueError("Case must be either 'linear' or 'conv'")
+        
+        embedder = torch.nn.Sequential(patcher, patch_embedder).to(device)
+        deembedder = torch.nn.Sequential(patch_deembedder, depatcher).to(device)
+
+        return embedder, deembedder, embed_dim
+
+    def plot_som_codebook(path, quantizer, deembedder, case):
         """Plot the codebook as a SOM."""
         with torch.no_grad():
             if not isinstance(quantizer, ResidualQuantizer):
@@ -496,11 +563,14 @@ if __name__ == "__main__":
 
                 codebook = codebook.permute(1, 2, 0) #h, w, dim
 
-                codebook = deembedder(codebook) #h, w, dim'
+                if case == "conv":
+                    codebook = deembedder(codebook) #c, h, w
+                else:
+                    codebook = deembedder[0](codebook) #h, w, dim'
+                    codebook = rearrange(codebook, "h w (p1 p2 c) -> c (h p1) (w p2)", p1 = patch_size, p2 = patch_size) #c, h, w
 
-                codebook = rearrange(codebook, "h w (p1 p2 c) -> c (h p1) (w p2)", p1 = patch_size, p2 = patch_size) #c, h, w
                 codebooks.append(codebook)
-            codebooks = torch.stack(codebooks, dim = 0)
+            codebooks = torch.concat(codebooks, dim = -1)
             codebooks = torchvision.utils.make_grid(codebooks, nrow = i + 1, padding = 2, pad_value = 1)
             save_im(codebooks, path + ".png")
 
@@ -522,6 +592,8 @@ if __name__ == "__main__":
     residual = True
     som_neighbor_distance = 1
     som_kernel = "hard"
+    case = "conv"
+    update_codebook = True
     residual_count = 4
     codebook_size = 512
 
@@ -532,35 +604,25 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     cifar = torchvision.datasets.CIFAR100(root = data_root, train = True, download = True)
-    
-    # these break a batch of images into patches and the converse, respectively
-    patcher = Rearrange("... c (h p1) (w p2) -> ... (h w) (p1 p2 c)", p1 = patch_size, p2 = patch_size).to(device)
-
-    depatcher = Rearrange("... (h w) (p1 p2 c) -> ... c (h p1) (w p2)", p1 = patch_size, p2 = patch_size, h = h // patch_size, w = w // patch_size).to(device)
-
-    # feedforward layers to convert the last dim of the patched images to an embedding dimension
-    patch_embedder = torch.nn.Sequential(
-        torch.nn.Linear(patch_dim, embed_dim),
-        torch.nn.LayerNorm(embed_dim),
-        torch.nn.ReLU(),
-        torch.nn.Linear(embed_dim, embed_dim)).to(device)
-    patch_deembedder = torch.nn.Sequential(
-        torch.nn.Linear(embed_dim, embed_dim),
-        torch.nn.ReLU(),
-        torch.nn.Linear(embed_dim, patch_dim)).to(device)
-    
+       
     comparison_losses = []
     for dist_type in ["cos", "e"]:
         for test_base in [True, False]:
+
+            embedder, deembedder, embed_dim = get_networks(case, 
+                                                           patch_dim, 
+                                                           embed_dim, 
+                                                           device)
+
             # test the quantizers
             if residual:
                 quantizer = ResidualQuantizer(residual_count, 
-                                                embed_dim, 
-                                                codebook_size, 
-                                                quantizer_class = "base" if test_base else "ema",
-                                                dist_type = dist_type,
-                                                som_neighbor_distance = som_neighbor_distance,
-                                                som_kernel_type = som_kernel)
+                                              embed_dim, 
+                                              codebook_size, 
+                                              quantizer_class = "base" if test_base else "ema",
+                                              dist_type = dist_type,
+                                              som_neighbor_distance = som_neighbor_distance,
+                                              som_kernel_type = som_kernel)
             elif test_base:
                 quantizer = BaseQuantizer(embed_dim, 
                                         codebook_size,
@@ -575,12 +637,12 @@ if __name__ == "__main__":
                                             som_neighbor_distance = som_neighbor_distance,
                                             som_kernel_type = som_kernel)
             if test_base:
-                chainz = chain(patch_embedder.parameters(),
-                            patch_deembedder.parameters(),
-                            quantizer.parameters())
+                chainz = chain(embedder.parameters(),
+                               deembedder.parameters(),
+                               quantizer.parameters())
             else:
-                chainz = chain(patch_embedder.parameters(),
-                            patch_deembedder.parameters(),)
+                chainz = chain(embedder.parameters(),
+                               deembedder.parameters())
                 
             quantizer.to(device)
 
@@ -600,19 +662,18 @@ if __name__ == "__main__":
                 for i, x in enumerate(tqdm(dataloader)):
                     optimizer.zero_grad()
                     x = x.to(device)
-                    x_orig = x.clone()
+                    x_orig = x.clone().detach()
 
-                    if i == 0:
+                    if (i == 0) and (epoch == 0):
                         x_copy = x.clone().detach()
 
-                    x = patcher(x)
-                    x = patch_embedder(x)
+                    x = embedder(x)          
 
-                    x, codebook_index, inner_loss = quantizer(x, update_codebook = True)
-                    x = patch_deembedder(x)
+                    x, codebook_index, inner_loss = quantizer(x, 
+                                                              update_codebook = update_codebook)
 
-                    x = depatcher(x)
-
+                    x = deembedder(x)
+  
                     loss = criterion(x, x_orig) + inner_loss
                     loss.backward()
                     optimizer.step()
@@ -624,14 +685,10 @@ if __name__ == "__main__":
                         b, c, h, w = x.shape
 
                         with torch.no_grad():
-                            x = patcher(x_copy)
-                            x = patch_embedder(x)
+                            x = embedder(x_copy)
 
-                            x, codebook_index, inner_loss = quantizer(x, update_codebook = True)
-                            x = patch_deembedder(x)
-
-                            x = depatcher(x)
-
+                            x, codebook_index, inner_loss = quantizer(x, update_codebook = update_codebook)
+                            x = deembedder(x)
 
                         x_out = torch.stack([x_copy, x], dim = 0)
                         x_out = rearrange(x_out, "n b c h w -> (b n) c h w")
@@ -639,7 +696,7 @@ if __name__ == "__main__":
                         x_out = torchvision.utils.make_grid(x_out, nrow = 8, padding = 2, pad_value = 1)
                         save_im(x_out, f"tmp/epoch_{epoch}_{str_i}.png")
                         if quantizer.use_som:
-                            plot_som_codebook(f"tmp/codebook_epoch_{epoch}_{str_i}", quantizer, patch_deembedder, patch_size = patch_size)
+                            plot_som_codebook(f"tmp/codebook_epoch_{epoch}_{str_i}", quantizer, deembedder, case)
                 quantizer.update_cutoff(ratio = 2/3)
                 print(f"Stale codebook entries: {quantizer.get_stale_clusters()}")
             comparison_losses.append(losses)

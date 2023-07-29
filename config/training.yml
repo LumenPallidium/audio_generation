@@ -7,25 +7,24 @@ sample_rate : 48000
 use_discriminator : False
 scratch_train : False
 
-lr : 0.0001
-scheduler_warmup : 10 # most scheduler params are hardcoded atm
+lr : 0.001
+scheduler_warmup : 100 # most scheduler params are hardcoded atm
 
 vae_args : # args for the vae
   in_channels : 1 
   num_quantizers : 8
   codebook_size : 1024
   input_format : "n c l"
-  use_energy_transformer : False
-  vq_cutoff_freq : 1.5
+  vq_cutoff_freq : 1
   use_som : True
-  vq_type : "base"
-  multires_skip_conn : False
+  som_kernel_type : "gaussian"
+  vq_type : "ema"
 
 trainer_args : # these are global args for the trainer
   batch_size : 8
-  accumulation_steps : 32
+  accumulation_steps : 16
   use_one_discriminator : True
-  generator_loss_weight : 1
+  generator_loss_weight : 4
   reconstruction_loss_weight : 8
   codebook_update_step : 1
   steps_per_epoch: 30000
@@ -33,7 +32,7 @@ trainer_args : # these are global args for the trainer
   discriminator_lr : 0.0001
 
 train_run_args : # these are args for a single run
-  epochs : 30
+  epochs : 18
   use_reconstruction_loss : True
   sparsity_weight : 0
   use_commit_loss : True

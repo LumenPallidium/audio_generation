@@ -188,8 +188,7 @@ def discriminator_generator_loss(original,
                                  reconstruction, 
                                  discriminator, 
                                  feature_multipier = 100, 
-                                 scale_feature_loss = True,
-                                 seperation_loss = 1e-3):
+                                 scale_feature_loss = True):
     """A function that is mostly generic for types of dicriminators. Feature multiplier controls
     how much discrimination at different scales are weighted. For reference, the paper uses 
     100 for this multiplier."""
@@ -209,9 +208,7 @@ def discriminator_generator_loss(original,
     discriminator_loss = 0
     generation_loss = 0
     for x, y, y_disc in zip(original_d, reconstruction_d, reconstruction_d2):
-        discriminator_loss += (relu_f(1 - x) + relu_f(1 + y_disc)).mean() / k
-        # extra loss term to ensure real and fake are seperated
-        discriminator_loss += seperation_loss / torch.abs(x - y_disc + 1e-3).mean()
+        discriminator_loss += (relu_f(1 - x).mean() + relu_f(1 + y_disc).mean()) / k
 
         generation_loss += relu_f(1 - y).mean() / k
 

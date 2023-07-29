@@ -103,7 +103,7 @@ class Trainer():
                  discriminators = None,
                  discriminator_paths = None,
                  use_one_discriminator = False,
-                 codebook_update_step = 4,
+                 codebook_update_step = 1,
                  mini_epoch_length = 100,
                  steps_per_epoch = None,
                  batch_size = 8,
@@ -114,11 +114,11 @@ class Trainer():
                  reconstruction_loss_weight = 10,
                  generator_loss_weight = 1,
                  loss_alpha = 0.95,
-                 noise_aug_scale = 0.01,
+                 noise_aug_scale = 0,
                  cutoff_scale_per_epoch = 0.95,
                  accumulation_steps = 8,
                  frequency_filter = 6000, # human voice tends to max at 5k Hz
-                 codebook_frequency_scale = 0.05, # force deeper entries to hear higher frequencies
+                 codebook_frequency_scale = 0.05, # allow deeper entries to hear higher frequencies
                  ):
         
         self.device = device
@@ -282,7 +282,6 @@ class Trainer():
                 discriminator = [self.discriminators[discriminator_number]]
                 optimizer_d = [self.optimizers[discriminator_number + 1]]
 
-
                 # chosen discriminator determines bitrate
                 codebook_n = self.codebook_options[discriminator_number]
             else:
@@ -290,7 +289,7 @@ class Trainer():
                 discriminator = self.discriminators
                 optimizer_d = self.optimizers[1:]
         else:
-            codebook_n = np.random.randint(1, self.model.num_quantizers + 1)
+            codebook_n = np.random.randint(2, self.model.num_quantizers + 1)
         
         for i in range(self.mini_epoch_length // accumulation_steps):
             optimizer.zero_grad()
@@ -336,7 +335,7 @@ class Trainer():
                 else:
                     loss = 0
 
-                if (not self.model.use_energy_transformer) and (use_commit_loss):
+                if use_commit_loss:
                     self.update_loss_breakdown(commit_loss, "commit_loss")
                     loss += commit_loss
 
@@ -427,8 +426,7 @@ class Trainer():
 
         for epoch in range(epochs):
             epoch_losses = []
-            if not self.model.use_energy_transformer:
-                epoch_start_stale_clusters = self.model.quantizer.get_stale_clusters()
+            epoch_start_stale_clusters = self.model.quantizer.get_stale_clusters()
             # reset the data loader each epoch
             train_loader = torch.utils.data.DataLoader(self.dataset,
                                                        batch_size=self.batch_size,
@@ -452,10 +450,10 @@ class Trainer():
             torchaudio.save(self.save_path + f"epoch_{epoch}_sample.wav", y[0].detach().cpu(), self.sample_rate)
 
             print(f"Epoch {self.epoch} mean loss: ", np.mean(epoch_losses))
+
             self.print_loss_breakdown()
-            if not self.model.use_energy_transformer:
-                epoch_end_stale_clusters = model.quantizer.get_stale_clusters()
-                utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
+            epoch_end_stale_clusters = model.quantizer.get_stale_clusters()
+            utils.print_stale_clusters(epoch_start_stale_clusters, epoch_end_stale_clusters)
 
             if epoch % self.save_every == 0:
                 

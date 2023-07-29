@@ -56,6 +56,20 @@ def snake_activation(x, alpha, eps = 1e-6):
     # type: (Tensor, Tensor, float) -> Tensor
     return x + (1 / (alpha + eps)) * (torch.sin(alpha * x) ** 2)
 
+@torch.jit.script
+def snake_relu_activation(x, alpha, eps = 1e-6):
+    """Modified version of the above to be more like a ReLU
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        The input tensor.
+    alpha : torch.Tensor
+        The alpha parameter, which can be learnable..
+    """
+    # type: (Tensor, Tensor, float) -> Tensor
+    return torch.clamp(x, 0) + (1 / (alpha + eps)) * (torch.sin(alpha * x) ** 2)
+
 class Snek(torch.nn.Module):
     def __init__(self,
                  in_channels,
@@ -71,6 +85,22 @@ class Snek(torch.nn.Module):
     
     def forward(self, x):
         return snake_activation(x, self.alphas)
+    
+class SnekReLU(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 dim = 1):
+        """Layer with learnable parameters for the snake activations"""
+        super().__init__()
+        if dim == 1:
+            self.alphas = torch.nn.Parameter(torch.ones(1, in_channels, 1))
+        elif dim == 2:
+            self.alphas = torch.nn.Parameter(torch.ones(1, in_channels, 1, 1))
+        else:
+            raise ValueError("Snek cannot handle such dims")
+    
+    def forward(self, x):
+        return snake_relu_activation(x, self.alphas)
 
 def plot_waveform(waveform, 
                   sample_rate, 
