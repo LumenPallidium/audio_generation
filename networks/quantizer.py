@@ -268,8 +268,8 @@ class EMAQuantizer(BaseQuantizer):
         Number of entries in the codebook.
     alpha : float
         The EMA decay rate for the codebook frequency.
-    eps : float
-        The epsilon value for divisions where the denominator may be zero.
+    smoothing_alpha : float
+        The value used in Laplace smoothing of the codebook frequency.
     cut_freq : int
         The cutoff frequency for removing codebook vectors and replacing with inputs.
     replace_with_obs : bool
@@ -291,7 +291,7 @@ class EMAQuantizer(BaseQuantizer):
                  dim : int, 
                  codebook_size : int, 
                  alpha : float = 0.96, 
-                 eps : float = 1e-5,
+                 smoothing_alpha : float = 1,
                  cut_freq : int = 2,
                  replace_with_obs : bool = True,
                  init_scale : float = 1.0,
@@ -314,14 +314,12 @@ class EMAQuantizer(BaseQuantizer):
                          in_rvq = in_rvq,
                          precreated_som = precreated_som)
         
-        self.eps = eps
+        self.smoothing_alpha = smoothing_alpha
         self.ema = True # helper bool
 
         # disable grad for the codebook
         self.codebook.requires_grad = False
         
-        # many implementations initialize this to 0s, but there are less annoying numerical issues when started as 1s
-        # this prior also makes more sense: a uniform distribution over the codebook by default
         self.register_buffer("ema_codebook", self.codebook.clone())
 
     def codebook_update_function(self, x, x_quantized, codebook_index, x_flat, codebook_onehot):
@@ -336,9 +334,9 @@ class EMAQuantizer(BaseQuantizer):
             # update ema codebook with the input vectors
             self.ema_codebook.data.mul_(self.alpha).add_(codebook_sum, alpha = 1 - self.alpha)
 
-            # normalize the codebook
+            # normalize the codebook with laplace smoothing
             n = self.cluster_frequency.sum()
-            cluster_frequency_normalized = ((self.cluster_frequency + self.eps) / (n + self.codebook_size * self.eps) * n)
+            cluster_frequency_normalized = ((self.cluster_frequency + self.smoothing_alpha) / (n + self.codebook_size * self.smoothing_alpha) * n)
             codebook_normalized = self.ema_codebook / cluster_frequency_normalized.unsqueeze(0)
 
             # overwrite codebook
@@ -359,6 +357,7 @@ class ResidualQuantizer(torch.nn.Module):
                  scale_factor = 4.0,
                  priority_n = 24,
                  vq_cutoff_freq = 2,
+                 decorr_loss_weight : float = 0.0,
                  use_som = True,
                  som_kernel_type = "hard",
                  som_neighbor_distance = 2,
@@ -370,6 +369,7 @@ class ResidualQuantizer(torch.nn.Module):
         self.dim = dim
         self.codebook_sizes = tuple_checker(codebook_sizes, num_quantizers)
         self.priority_n = priority_n
+        self.decorr_loss_weight = decorr_loss_weight
         self.use_som = use_som
         self.dist_type = dist_type
 
@@ -402,8 +402,7 @@ class ResidualQuantizer(torch.nn.Module):
                 x, 
                 n = None, 
                 update_codebook : bool = False, 
-                prioritize_early : bool = False,
-                decorr_loss_weight : float = 0.0):
+                prioritize_early : bool = False):
         # can limit to first n quantizers, they call this bitrate dropout in the paper
         # if n is None, use all quantizers, for training n will typically be sampled uniformly from [1, num_quantizers]
         if n is None:
@@ -419,9 +418,9 @@ class ResidualQuantizer(torch.nn.Module):
 
             x_i, index, inner_loss_i = self.quantizers[i](residual, update_codebook = update_codebook)
 
-            if (decorr_loss_weight > 0) and (i > 0):
+            if (self.decorr_loss_weight > 0) and (i > 0):
                 # loss term to encourage decorrelation between quantizers
-                decorr_loss = decorr_loss_weight * torch.nn.functional.cosine_similarity(x_i, prev_x_i, dim = -1).mean()
+                decorr_loss = self.decorr_loss_weight * torch.nn.functional.cosine_similarity(x_i, prev_x_i, dim = -1).mean()
                 decorr_loss /= (self.num_quantizers - 1)
                 inner_loss_i += decorr_loss
             
@@ -557,8 +556,18 @@ if __name__ == "__main__":
             else:
                 quantizers = quantizer.quantizers
             codebooks = []
+            # we use this so that deeper entries are shown in a realistic setting
+            max_entry = torch.zeros(quantizers[0].codebook.shape[0], 1, device = device)
             for i, quantizer in enumerate(quantizers):
-                codebook = quantizer.codebook #dim, codebook_size
+                codebook = quantizer.codebook.clone() #dim, codebook_size
+
+                # build a realistic setting by using the most common codebook entries
+                argmax_entry = quantizer.cluster_frequency.argmax()
+                max_entry_i = codebook[:, argmax_entry]
+
+                codebook += max_entry
+                max_entry += max_entry_i.unsqueeze(-1)
+
                 codebook = quantizer.som.codebook_to_grid(codebook) #dim, h, w
 
                 codebook = codebook.permute(1, 2, 0) #h, w, dim
@@ -590,15 +599,15 @@ if __name__ == "__main__":
     n_patches = (h // patch_size) * (w // patch_size)
     batch_size = 32
     residual = True
-    som_neighbor_distance = 1
+    som_neighbor_distance = 2
     som_kernel = "hard"
-    case = "conv"
+    case = "linear"
     update_codebook = True
     residual_count = 4
     codebook_size = 512
 
     # training params
-    n_epochs = 8
+    n_epochs = 5
     lr = 1e-3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -606,8 +615,12 @@ if __name__ == "__main__":
     cifar = torchvision.datasets.CIFAR100(root = data_root, train = True, download = True)
        
     comparison_losses = []
-    for dist_type in ["cos", "e"]:
-        for test_base in [True, False]:
+    for dist_type in ["cos",
+                      "e"
+                      ]:
+        for test_base in [True,
+                          False
+                          ]:
 
             embedder, deembedder, embed_dim = get_networks(case, 
                                                            patch_dim, 
@@ -652,6 +665,7 @@ if __name__ == "__main__":
             criterion = torch.nn.MSELoss()
 
             losses = []
+            cb_1_mean = []
 
             for epoch in range(n_epochs):
                 print(f"Epoch {epoch}")
@@ -679,6 +693,7 @@ if __name__ == "__main__":
                     optimizer.step()
 
                     losses.append(loss.item())
+                    cb_1_mean.append(quantizer.quantizers[0].codebook.mean().item())
                     
                     if i % output_every == 0:
                         str_i = str(i).zfill(5)

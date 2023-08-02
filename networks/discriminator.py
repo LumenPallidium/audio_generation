@@ -55,11 +55,9 @@ class WaveFormDiscriminator(torch.nn.Module):
                  name = "waveform_discriminator",
                  n_blocks = 3,
                  scalefactor_per_block = 2,
-                 feature_multiplier = 100,
                  norm = "spectral"):
         
         super().__init__()
-        self.feature_multiplier = feature_multiplier
         self.name = name
         scales = [scalefactor_per_block**i for i in range(n_blocks)]
 
@@ -195,7 +193,7 @@ def discriminator_generator_loss(original,
     # get discrimination on the real and fake waveform
     original_d, original_features = discriminator(original.clone().requires_grad_())
     reconstruction_d, reconstruction_features = discriminator(reconstruction)
-    # why a second time? we need one copy for the generator loss throught the full disc + generator graph, and one for the discriminator loss
+    # why a second time? we need one copy for the generator loss through the full disc + generator graph, and one for the discriminator loss
     reconstruction_d2, _ = discriminator(reconstruction.detach().clone().requires_grad_())
 
     # k = number of levels in the discriminator
@@ -208,9 +206,11 @@ def discriminator_generator_loss(original,
     discriminator_loss = 0
     generation_loss = 0
     for x, y, y_disc in zip(original_d, reconstruction_d, reconstruction_d2):
-        discriminator_loss += (relu_f(1 - x).mean() + relu_f(1 + y_disc).mean()) / k
+        real_d_loss = -torch.minimum(x - 1, torch.zeros_like(x)).mean()
+        fake_d_loss = -torch.minimum(-y - 1, torch.zeros_like(y)).mean()
+        discriminator_loss += (real_d_loss + fake_d_loss) / k
 
-        generation_loss += relu_f(1 - y).mean() / k
+        generation_loss += -(y.mean() / k)
 
     # feature wise loss - generated samples should "look-like" original at all scales
     feature_loss = 0

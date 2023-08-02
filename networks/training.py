@@ -117,8 +117,9 @@ class Trainer():
                  noise_aug_scale = 0,
                  cutoff_scale_per_epoch = 0.95,
                  accumulation_steps = 8,
-                 frequency_filter = 6000, # human voice tends to max at 5k Hz
-                 codebook_frequency_scale = 0.05, # allow deeper entries to hear higher frequencies
+                 frequency_filter = 5000, # human voice tends to max at 5k Hz
+                 codebook_frequency_scale = 0.1, # allow deeper entries to hear higher frequencies
+                 pre_emphasis = 0.97,
                  ):
         
         self.device = device
@@ -165,6 +166,7 @@ class Trainer():
         self.frequency_filter = frequency_filter
         self.codebook_frequency_scale = codebook_frequency_scale
         self.cutoff_scale_per_epoch = cutoff_scale_per_epoch
+        self.pre_emphasis = pre_emphasis
         
         # load discriminators
         self.discriminators, self.codebook_options = self._init_discriminators(discriminators, discriminator_paths, discriminator_lr)
@@ -327,7 +329,11 @@ class Trainer():
 
                 if use_reconstruction_loss:
 
-                    loss = torch.nn.functional.l1_loss(x, y)
+                    if self.pre_emphasis is not None:
+                        x = torchaudio.functional.preemphasis(x, self.pre_emphasis)
+                        y = torchaudio.functional.preemphasis(y, self.pre_emphasis)
+
+                    loss = torch.nn.functional.mse_loss(x, y)
                         
                     loss *= self.reconstruction_loss_weight
 

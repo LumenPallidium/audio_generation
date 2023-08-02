@@ -26,7 +26,9 @@ def approximate_square_root(x):
     return a, b
 
 def np_softmax(lis):
-    """A softmax function that works on numpy arrays"""
+    """A softmax function that works on 1D numpy arrays"""
+    min_lis = np.min(lis)
+    lis = [x - min_lis for x in lis]
     return np.exp(lis) / np.sum(np.exp(lis))
 
 def add_util_norm(module, norm = "weight", **norm_kwargs):

@@ -218,8 +218,8 @@ class CausalVQAE(torch.nn.Module):
                  norm = torch.nn.Identity,
                  depthwise = False,
                  use_som = True,
-                 som_kernel_type = "gaussian",
-                 wavelet_decoders = [False, False, True, False, False],
+                 som_kernel_type = "hard",
+                 wavelet_decoders = [False, True, False, False, False],
                  ):
         
         super().__init__()
