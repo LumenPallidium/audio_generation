@@ -242,12 +242,12 @@ class WaveletLayer(torch.nn.Module):
         plt.close()
 
 
-def simple_mixed_sin(num_freqs, interval, freq_range = 20):
+def simple_mixed_sin(num_freqs, interval, freq_range = 20, shift = 5, device = "cpu"):
     """Generates a signal composed of mixture of sinusoids."""
-    freqs = torch.rand(num_freqs) * freq_range
+    freqs = torch.rand(num_freqs, device = device) * freq_range + shift
     freqs = torch.sort(freqs)[0]
     sins = torch.sin(2 * torch.pi * freqs.unsqueeze(-1) * interval.unsqueeze(0))
-    sins = sins.sum(dim = 0, keepdim = True).unsqueeze(0)
+    sins = sins.mean(dim = 0, keepdim = True).unsqueeze(0)
     return freqs, sins
 
 

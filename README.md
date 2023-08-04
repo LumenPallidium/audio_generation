@@ -21,16 +21,25 @@ Here, each color represents a different codebook, so the plot is displaying the 
 * I explored the use of energy transformers for this task. This was initially included in this repository, but now is its own [seperate repository](https://github.com/LumenPallidium/energy_transformer), from where it can be pip installed (see instructions there).
 
 
+
 ## Acknowledgements
-The work of Phil Wang [(lucidrains)](https://github.com/lucidrains) was important both as a reference and for some functions. While this repo was mostly developed independently, a number of key steps were drawn from his work, most notably in the structure of "causal" convolution layers. Additionally, reference was made to the [encodec](https://github.com/facebookresearch/encodec) repo from Facebook Research, which were referenced for further improving the causal convolution layers. Additionally, reference
-was made to OpenAI's Jukebox model and rosinality's VQ-VAE for building the 
-VQ-VAE layers.
+The work of Phil Wang [(lucidrains)](https://github.com/lucidrains) was important both as a reference and for some functions. While this repo was mostly developed independently, a number of key steps were drawn from his work, most notably in the structure of "causal" convolution layers. Additionally, reference was made to the [encodec](https://github.com/facebookresearch/encodec) repo from Facebook Research, which were referenced for further improving the causal convolution layers. Facebook/Meta's AudioCraft can also be used in this repo. Additionally, reference
+was made to OpenAI's Jukebox model and rosinality's VQ-VAE for building the VQ-VAE layers. 
+
 
 ## Running This
 
 The main parameters you might want to control are in the config/training.yml file. I prefer using configs to CLI arguments, so argparse etc are not implemented.
 
 See environment.yml for the package details. It's probably better as a guideline. An important thing to mention is that you should use the latest Pytorch versions (>= 2.0), as I do use torch.func for the energy transformers (need to take gradients, differentiably).
+
+If you want to use Meta's AudioCraft with this repo, then you need to run:
+
+```
+pip install -U audiocraft
+```
+
+I only use the neural audio codec (EnCodec) from AudioCraft, which is optional.
 
 ## The Generative Model
 

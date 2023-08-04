@@ -18,7 +18,8 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
                  groups = [1, 4, 16, 64, 256, 1, 1],
                  activation = torch.nn.LeakyReLU(0.2),
                  scale = 1,
-                 norm = "spectral"):
+                 norm = "spectral",
+                 apply_sigmoid = True):
         super().__init__()
 
         n_steps = len(channel_sizes)
@@ -41,11 +42,17 @@ class WaveformDiscriminatorBlock(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList(layers)
 
+        if apply_sigmoid:
+            self.final_activation = torch.nn.Sigmoid()
+        else:
+            self.final_activation = torch.nn.Identity()
+
     def forward(self, x):
         features = []
         for layer in self.layers:
             x = layer(x)
             features.append(x)
+        x = self.final_activation(x)
         return x, features
 
 class WaveFormDiscriminator(torch.nn.Module):
@@ -123,7 +130,8 @@ class STFTDiscriminator(torch.nn.Module):
                  feature_multiplier = 1,
                  normalize_stft = True,
                  norm = "spectral",
-                 base_name = "stft_discriminator"):
+                 base_name = "stft_discriminator",
+                 apply_sigmoid = True):
         super().__init__()
 
         self.win_length = win_length
@@ -159,6 +167,11 @@ class STFTDiscriminator(torch.nn.Module):
                                           kernel_size = (1, final_kernel_size),
                                           padding = (0, (final_kernel_size - 1) // 2)),
                                         norm = norm)
+        
+        if apply_sigmoid:
+            self.final_activation = torch.nn.Sigmoid()
+        else:
+            self.final_activation = torch.nn.Identity()
 
     def forward(self, x):
         # need to remove and re-add channel dimension
@@ -180,6 +193,7 @@ class STFTDiscriminator(torch.nn.Module):
             x = block(x)
             features.append(x)
         x = self.final_conv(x)
+        x = self.final_activation(x)
         return [x], features
 
 def discriminator_generator_loss(original, 
@@ -198,16 +212,14 @@ def discriminator_generator_loss(original,
 
     # k = number of levels in the discriminator
     k = len(original_d)
-
-    relu_f = torch.nn.functional.relu
     l1_f = torch.nn.functional.l1_loss
 
-    # general hinge loss for GAN
+    # hinge loss for GAN
     discriminator_loss = 0
     generation_loss = 0
     for x, y, y_disc in zip(original_d, reconstruction_d, reconstruction_d2):
         real_d_loss = -torch.minimum(x - 1, torch.zeros_like(x)).mean()
-        fake_d_loss = -torch.minimum(-y - 1, torch.zeros_like(y)).mean()
+        fake_d_loss = -torch.minimum(-y_disc - 1, torch.zeros_like(y_disc)).mean()
         discriminator_loss += (real_d_loss + fake_d_loss) / k
 
         generation_loss += -(y.mean() / k)
@@ -227,6 +239,59 @@ def discriminator_generator_loss(original,
     return generator_loss, discriminator_loss
 
 if __name__ == "__main__":
-    input_t = torch.randn(1, 1, 72000)
-    disc = STFTDiscriminator(win_length = 128)
-    disc(input_t)
+    # test by seeing if we can get a generator to implictly approximate frequency distribution of a signal
+    import matplotlib.pyplot as plt
+    from tqdm import tqdm
+    from wavelets import simple_mixed_sin
+    n_iters = 1000
+    batch_size = 32
+    hidden_dim = 32
+    n_freqs = 5
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    interval = torch.arange(-1, 1, 2 / 32768, device = device)
+    disc = WaveFormDiscriminator(1).to(device)
+    generator = torch.nn.Sequential(
+                    torch.nn.Linear(hidden_dim, hidden_dim),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(hidden_dim, n_freqs)).to(device)
+    
+    opt_g = torch.optim.Adam(generator.parameters(), lr = 1e-3)
+    opt_d = torch.optim.Adam(disc.parameters(), lr = 1e-3)
+
+    losses_g = []
+    losses_d = []
+
+    for iter in tqdm(range(n_iters)):
+        opt_g.zero_grad()
+        opt_d.zero_grad()
+
+        _, input_t = simple_mixed_sin(20, interval, device = device)
+        
+        z = torch.randn(hidden_dim, device = device)
+
+        # generation steps
+        x = generator(z)
+        x = torch.sin(2 * torch.pi * x.unsqueeze(-1) * interval.unsqueeze(0))
+        x = x.mean(dim = 0, keepdim = True).unsqueeze(0)
+
+        loss_g, loss_d = discriminator_generator_loss(input_t, x, disc,
+                                                      feature_multipier = 0)
+
+        loss_g.backward(retain_graph = True)
+        opt_g.step()
+
+        loss_d.backward()
+        opt_d.step()
+
+        losses_g.append(loss_g.item())
+        losses_d.append(loss_d.item())
+    
+    fig, ax = plt.subplots(2, 1)
+    ax[0].plot(losses_g, label = "generator")
+    ax[0].plot(losses_d, label = "discriminator")
+    ax[0].legend()
+
+    ax[1].plot(input_t[0][0].detach().cpu().numpy(), label = "original")
+    ax[1].plot(x[0][0].detach().cpu().numpy(), label = "generated")
+    ax[1].legend()
