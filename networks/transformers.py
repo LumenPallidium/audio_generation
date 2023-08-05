@@ -160,6 +160,7 @@ class Attention(torch.nn.Module):
         # storing cause it's used twice
         add_pos_emb = self.has_pos_emb and not self.alibi
 
+        # TODO: might need to flip x and y?
         if self.cross_attention:
             assert y is not None, "Cross attention requires two inputs"
             if add_pos_emb:
@@ -276,12 +277,105 @@ class Transformer(torch.nn.Module):
             x = x + ff(x)
         return x
     
+class ConformerConvBlock(torch.nn.Module):
+    """
+    A conformer convolutional block.
+    Matches the paper, except allows for choice of final activation function.
+    Defaults to kernel size of 17, which paper suggests has best ratio of
+    performance to number of parameters.
+
+    Parameters
+    ----------
+    in_channels : int
+        The number of input channels
+    kernel_size : int, optional
+        The kernel size, by default 17
+    dropout : float, optional
+        The dropout rate, by default 0.1
+    activation : torch.nn.Module, optional
+        The activation function, by default torch.nn.SiLU
+    """
+    def __init__(self,
+                 in_channels,
+                 kernel_size = 17,
+                 dropout = 0.1,
+                 activation = torch.nn.SiLU,):
+        super().__init__()
+        self.in_channels = in_channels
+        self.kernel_size = kernel_size
+
+        if dropout > 0:
+            dropout = torch.nn.Dropout(dropout)
+        else:
+            dropout = torch.nn.Identity()
+
+        self.net = torch.nn.Sequential(
+                        torch.nn.LayerNorm(self.in_channels),
+                        torch.nn.Conv1d(in_channels = self.in_channels,
+                                          out_channels = 2 * self.in_channels,
+                                          kernel_size = 1),
+                        torch.nn.GLU(dim = -2),
+                        torch.nn.Conv1d(in_channels = self.in_channels,
+                                        out_channels = self.in_channels,
+                                        kernel_size = self.kernel_size,
+                                        padding = "same",
+                                        groups = self.out_channels),
+                        torch.nn.BatchNorm1d(self.out_channels),
+                        activation(),
+                        torch.nn.Conv1d(in_channels = self.in_channels,
+                                        out_channels = self.in_channels,
+                                        kernel_size = 1),
+                        dropout)
+
+    def forward(self, x):
+        # assume input is (batch, time, channels)
+        x = rearrange(x, "b n d -> b d n")
+        x = self.net(x)
+        return rearrange(x, "b d n -> b n d")
+
+class ConformerBlock(torch.nn.Module):
+    def __init__(self,
+                 dim,
+                 hidden_dim_ratio = 4,
+                 heads = 8,
+                 dropout = 0.1,
+                 ff_activation = torch.nn.SiLU,
+                 conv_activation = torch.nn.SiLU,):
+        super().__init__()
+        self.first_ff = FeedForward(dim, 
+                                    dim * hidden_dim_ratio,
+                                    activation = ff_activation,
+                                    dropout = dropout)
+        self.attention = Attention(dim,
+                                   n_heads = heads,
+                                   dim_head = dim // heads,
+                                   activation = torch.nn.SiLU,
+                                   dropout = dropout)
+        self.conv_block = ConformerConvBlock(dim,
+                                             dropout = dropout,
+                                             activation = conv_activation)
+        self.second_ff = FeedForward(dim,
+                                     dim * hidden_dim_ratio,
+                                     activation = ff_activation,
+                                     dropout = dropout)
+        self.layer_norm = torch.nn.LayerNorm(dim)
+
+    def forward(self, x):
+        x = x + 0.5 * self.first_ff(x)
+        x = x + self.attention(x)
+        x = x + self.conv_block(x)
+        return self.layer_norm(x + 0.5 * self.second_ff(x))
+
+    
 if __name__ == "__main__":
     #TODO : look into wavelet spectrogram !?!
     #TODO : add positional encoding/embedding
     #TODO : add qk rmsnorm mentioned by Phil Wang
     #TODO : try GEGLU acitvation?
-    #TODO : add conformer
+
+    #TODO : get person specific frequency range
+    #TODO : general semantic information extractor (VICReg with pitch shifts)
+    #TODO : use specifc frequency range as conditioner
 
     # an "image"
     x, sample_rate = torchaudio.load("../data/opera-singer.wav")
