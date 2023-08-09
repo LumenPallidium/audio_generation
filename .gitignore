@@ -131,6 +131,7 @@ dmypy.json
 # folders
 /data
 /networks/tmp
+/networks/data
 
 # data files
 *.csv
