@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
 import torchaudio
-from torch import Tensor
+import torch
+import numpy as np
 from torch.utils.data import Dataset
 
 # PORTED FROM HERE:
@@ -12,7 +13,7 @@ from torch.utils.data import Dataset
 # needed to fix some things
 def load_commonvoice_item(
     line: List[str], header: List[str], path: str, folder_audio: str, ext_audio: str
-) -> Tuple[Tensor, int, Dict[str, str]]:
+) -> Tuple[torch.Tensor, int, Dict[str, str]]:
     # Each line as the following data:
     # client_id, path, sentence, up_votes, down_votes, age, gender, accent
 
@@ -55,7 +56,7 @@ class COMMONVOICE(Dataset):
             self._header = next(walker)
             self._walker = list(walker)
 
-    def __getitem__(self, n: int) -> Tuple[Tensor, int, Dict[str, str]]:
+    def __getitem__(self, n: int) -> Tuple[torch.Tensor, int, Dict[str, str]]:
         """Load the n-th sample from the dataset.
 
         Args:
@@ -86,3 +87,60 @@ class COMMONVOICE(Dataset):
 
     def __len__(self) -> int:
         return len(self._walker)
+    
+def overtones(shape, freq, n_overtones=5, sample_rate=16000, max = 0.125, normalize = True):
+    interval = torch.arange(shape[-1], dtype=torch.float32) / sample_rate
+    interval = interval * (freq * 2 * torch.pi)
+    overtones = torch.sin(interval.unsqueeze(0) * torch.arange(1, n_overtones + 1).unsqueeze(1)).mean(0)
+    overtones = overtones / overtones.abs().max() * max
+    return overtones
+
+def introduce_disharmony(waveform, 
+                         magnitude_scale=0.5, 
+                         offset_range = (1, 80),
+                         n_segments = None,
+                         segment_length = None):
+    spectrum = torch.fft.fft(waveform)
+    magnitude_spectrum = torch.abs(spectrum)
+
+    max_magnitude = magnitude_spectrum.max()
+
+    if segment_length is not None:
+        n_segments = waveform.shape[-1] // segment_length
+
+    b, c, l = waveform.shape
+    if n_segments is not None:
+        segment_length = l // n_segments
+        spectrum = spectrum.view(b, c, n_segments, segment_length)
+        magnitude_spectrum = magnitude_spectrum.view(b, c, n_segments, segment_length)
+
+    # max along the segments
+    _, dominant_idx = torch.max(magnitude_spectrum, dim=-1)
+
+
+
+    offset = torch.randint(*offset_range, size=dominant_idx.shape)
+    disharmonic_idx = dominant_idx + offset
+
+    # dummy indices for help
+    b_indices = torch.arange(b)[:, None, None]
+    c_indices = torch.arange(c)[None, :, None]
+    n_indices = torch.arange(n_segments)[None, None, :]
+
+    spectrum[b_indices, c_indices, n_indices, disharmonic_idx] += magnitude_scale * max_magnitude
+
+    # coerce and return to time basis
+    spectrum = spectrum.view(b, c, l)
+    modified_waveform = torch.fft.ifft(spectrum).real
+
+    return modified_waveform
+
+
+#TODO : doesn't seem to have modified audio in segments?
+if __name__ == "__main__":
+    from IPython.display import Audio
+    om = torchaudio.load(r"om.wav")[0].unsqueeze(0)
+    tmp = introduce_disharmony(om, magnitude_scale=100, n_segments=4).squeeze(0)
+    Audio(tmp.detach().cpu().numpy(), rate = 16000)
+
+    
