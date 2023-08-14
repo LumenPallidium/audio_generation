@@ -93,9 +93,9 @@ class Alibi(torch.nn.Module):
         return M.unsqueeze(0)
 
 class Attention(torch.nn.Module):
-    """Based on ViT implementation from Phil Wang:
-    https://github.com/lucidrains/musiclm-pytorch/blob/main/musiclm_pytorch/musiclm_pytorch.py
-    
+    """
+    Standard multi-head attention module.
+
     Parameters
     ----------
     dim : int
@@ -143,6 +143,7 @@ class Attention(torch.nn.Module):
     def _init_pos_emb(self, context_x, context_y):
         self.context = context_x
         if self.alibi:
+            self.cross_attention = False if context_y is None else True
             self.alibi_obj = Alibi(context_x, context_y, n_heads = self.n_heads)
         else:
             if context_y is None:
