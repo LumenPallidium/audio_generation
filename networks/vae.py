@@ -3,7 +3,7 @@ import torchaudio
 import einops
 import numpy as np
 from math import ceil
-from quantizer import ResidualQuantizer, tuple_checker
+from som_quantizer import ResidualQuantizer, tuple_checker
 from wavelets import MultiresScaleBlock, WaveletLayer
 from utils import add_util_norm, animate_sound, Snek
 

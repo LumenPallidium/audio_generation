@@ -7,7 +7,7 @@ If you are interested in a general implementation of Soundstream or a neural aud
 
 * I've implemented [multiresolution convolutions](https://arxiv.org/abs/2305.01638), see the networks/wavelets.py file (which also includes an attempt at a wavelet-based upscaler). While they are implemented, these are not currently integrated into the main VQ-VAE model
 * In a similar vein to above, I implemented a custom type of layer I call a wavelet layer. The standard neural audio codec method of using upsampling and convolutions to increase the resolution seemed like it ignored a key piece of information: sound is composed of waves. Wavelet layers are special upsampling layers that try and implicitly learn a wavelet decomposition and upsample it.
-* I've added [modern self-organizing maps (SOMs)](https://arxiv.org/abs/2302.07950) to the codebooks, see networks/som_utils.py. Additionally, I added a differential version of these SOMs based on [this](https://arxiv.org/abs/1806.02199). I also include a test on CIFAR which makes pretty pictures. 
+* I've added [modern self-organizing maps (SOMs)](https://arxiv.org/abs/2302.07950) to the codebooks, which must be installed from [here](https://github.com/LumenPallidium/quantization-maps). Additionally, I added a differential version of these SOMs based on [this](https://arxiv.org/abs/1806.02199). I also include a test on CIFAR which makes pretty pictures. 
 
 
 https://github.com/LumenPallidium/audio_generation/assets/42820488/567d3d5b-27e1-4cbb-b5f1-44c1cc9536c1
@@ -31,7 +31,7 @@ was made to OpenAI's Jukebox model and rosinality's VQ-VAE for building the VQ-V
 
 The main parameters you might want to control are in the config/training.yml file. I prefer using configs to CLI arguments, so argparse etc are not implemented.
 
-See environment.yml for the package details. It's probably better as a guideline. An important thing to mention is that you should use the latest Pytorch versions (>= 2.0), as I do use torch.func for the energy transformers (need to take gradients, differentiably).
+See environment.yml for the package details. It's probably better as a guideline. An important thing to mention is that you should use the latest Pytorch versions (>= 2.0), as I do use torch.func for the energy transformers (need to take gradients, differentiably). You will need to [install vector quantization from here](https://github.com/LumenPallidium/quantization-maps) (instructions provided in that repository).
 
 If you want to use Meta's AudioCraft with this repo, then you need to run:
 
